@@ -6,7 +6,7 @@ const defaultStunUrls = [
 ]
 
 function parseFlag(value: string | undefined, fallback: boolean) {
-  if (value === undefined) {
+  if (value === undefined || value.trim() === '') {
     return fallback
   }
 
@@ -14,7 +14,7 @@ function parseFlag(value: string | undefined, fallback: boolean) {
 }
 
 function parseNumber(value: string | undefined, fallback: number) {
-  if (value === undefined) {
+  if (value === undefined || value.trim() === '') {
     return fallback
   }
 
