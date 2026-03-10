@@ -160,6 +160,22 @@ describe('app flows', () => {
     expect(app.text()).not.toContain('text chat lands')
   })
 
+  it('joins a room by typing a human-readable room code from the lobby', async () => {
+    const app = await mountAt('/')
+    const roomStore = useRoomStore()
+
+    await app.get('#room-code').setValue('Amber-Wave-42')
+    await app.get('form.home-view__manual-join').trigger('submit')
+    await flushPromises()
+
+    expect(router.currentRoute.value.params.roomId).toBe('amber-wave-42')
+    expect(signalingFns.ensureJoiner).toHaveBeenLastCalledWith(
+      'amber-wave-42',
+      'amber-wave-42'
+    )
+    expect(roomStore.room?.localMode).toBe('join')
+  })
+
   it('sends a room chat message through the mocked signaling layer', async () => {
     const app = await mountAt('/room/room-deadbeef')
 

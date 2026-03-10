@@ -115,7 +115,17 @@ h2 {
 .members-list__item p {
   margin: 0.35rem 0 0;
   color: var(--text-muted);
-  font-size: 0.85rem;
+  font-family:
+    ui-monospace,
+    'SFMono-Regular',
+    'SF Mono',
+    Menlo,
+    Monaco,
+    Consolas,
+    'Liberation Mono',
+    monospace;
+  font-size: 0.75rem;
+  line-height: 1.4;
   overflow-wrap: anywhere;
 }
 

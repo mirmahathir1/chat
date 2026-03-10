@@ -16,17 +16,27 @@ const props = withDefaults(
 const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
 const qrDataUrl = ref('')
 const isHostView = computed(() => props.room.localMode === 'host')
+const manualJoinCode = computed(() =>
+  props.room.id === props.room.hostPeerId ? props.room.id : null
+)
 
-const shareFields = computed(() => [
-  {
-    label: 'Room ID',
-    value: props.room.id,
-  },
-  {
-    label: 'Host peer ID',
-    value: props.room.hostPeerId,
-  },
-])
+const shareFields = computed(() => {
+  const fields = [
+    {
+      label: manualJoinCode.value ? 'Room code' : 'Room ID',
+      value: props.room.id,
+    },
+  ]
+
+  if (props.room.hostPeerId !== props.room.id) {
+    fields.push({
+      label: 'Host peer ID',
+      value: props.room.hostPeerId,
+    })
+  }
+
+  return fields
+})
 
 watchEffect(async () => {
   if (!isHostView.value) {
@@ -73,6 +83,12 @@ async function copyShareLink() {
 
     <div v-if="isHostView" class="share-panel__qr">
       <img :src="qrDataUrl" alt="QR code for the room invite link" />
+    </div>
+
+    <div v-if="manualJoinCode" class="share-panel__room-code">
+      <span>Room code</span>
+      <code>{{ manualJoinCode }}</code>
+      <p>Type this code on another device to connect.</p>
     </div>
 
     <details class="share-panel__details">
@@ -160,6 +176,29 @@ h2 {
   margin-top: 1rem;
 }
 
+.share-panel__room-code {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 1rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.share-panel__room-code span {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.share-panel__room-code p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
 .share-panel__summary {
   cursor: pointer;
   color: var(--text-muted);
@@ -190,7 +229,17 @@ h2 {
 code {
   overflow-wrap: anywhere;
   color: var(--text-main);
-  font-size: 0.92rem;
+  font-family:
+    ui-monospace,
+    'SFMono-Regular',
+    'SF Mono',
+    Menlo,
+    Monaco,
+    Consolas,
+    'Liberation Mono',
+    monospace;
+  font-size: 0.75rem;
+  line-height: 1.4;
 }
 
 .share-panel__url {

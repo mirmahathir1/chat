@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { storeToRefs } from 'pinia'
-import { watch } from 'vue'
+import { ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { normalizeHumanReadableId } from '@/lib/humanId'
 import SharePanel from '@/components/room/SharePanel.vue'
 import { useRoomStore } from '@/stores/room'
 import { useSignalingStore } from '@/stores/signaling'
@@ -11,6 +12,8 @@ const roomStore = useRoomStore()
 const signalingStore = useSignalingStore()
 const { room, connectedMemberCount } = storeToRefs(roomStore)
 const { isReady, state: signalingState, errorMessage } = storeToRefs(signalingStore)
+const joinRoomCode = ref('')
+const joinRoomError = ref('')
 
 if (!roomStore.room || roomStore.room.localMode !== 'host') {
   signalingStore.ensureHost(roomStore.bootstrapHostedRoom())
@@ -45,12 +48,33 @@ function retryHost() {
   signalingStore.destroyPeer()
   signalingStore.ensureHost(room.value.id)
 }
+
+function joinTypedRoom() {
+  const normalizedRoomCode = normalizeHumanReadableId(joinRoomCode.value)
+
+  if (!normalizedRoomCode) {
+    joinRoomError.value = 'Enter a room code like amber-wave-42.'
+
+    return
+  }
+
+  joinRoomError.value = ''
+  router.push({
+    name: 'room',
+    params: {
+      roomId: normalizedRoomCode,
+    },
+    query: {
+      host: normalizedRoomCode,
+    },
+  })
+}
 </script>
 
 <template>
   <main class="page-shell home-view">
     <section class="panel home-view__launchpad">
-      <h2>Scan this code to join the live room.</h2>
+      <h2>Scan the QR code or type the room code to join the live room.</h2>
 
       <div v-if="!isReady" class="home-view__status">
         <p v-if="errorMessage">{{ errorMessage }}</p>
@@ -71,6 +95,29 @@ function retryHost() {
       </div>
 
       <SharePanel v-if="room && isReady" :room="room" :show-header="false" />
+
+      <form class="home-view__manual-join" @submit.prevent="joinTypedRoom">
+        <p class="eyebrow">Manual join</p>
+        <label class="home-view__manual-join-label" for="room-code">
+          Type a room code
+        </label>
+        <div class="home-view__manual-join-row">
+          <input
+            id="room-code"
+            v-model="joinRoomCode"
+            type="text"
+            placeholder="amber-wave-42"
+            autocapitalize="off"
+            autocomplete="off"
+            spellcheck="false"
+            @input="joinRoomError = ''"
+          />
+          <button type="submit" class="secondary-button">Join room</button>
+        </div>
+        <p v-if="joinRoomError" class="home-view__manual-join-error">
+          {{ joinRoomError }}
+        </p>
+      </form>
     </section>
   </main>
 </template>
@@ -98,5 +145,38 @@ h2 {
   gap: 0.75rem;
   margin: 1rem 0 0;
   color: var(--text-muted);
+}
+
+.home-view__manual-join {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 1.25rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--border);
+}
+
+.home-view__manual-join-label {
+  color: var(--text-main);
+  font-size: 0.95rem;
+}
+
+.home-view__manual-join-row {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.home-view__manual-join-row button {
+  flex: 0 0 auto;
+}
+
+.home-view__manual-join-error {
+  margin: 0;
+  color: var(--accent-soft);
+}
+
+@media (max-width: 640px) {
+  .home-view__manual-join-row {
+    flex-direction: column;
+  }
 }
 </style>

@@ -90,10 +90,13 @@ export const useSessionStore = defineStore('session', () => {
     persistSession()
   }
 
-  function rotatePeerIdentity(role: PeerRole = peer.value?.role ?? 'member') {
+  function rotatePeerIdentity(
+    role: PeerRole = peer.value?.role ?? 'member',
+    id = createId('peer')
+  ) {
     const now = new Date().toISOString()
     const nextPeer: PeerIdentity = {
-      id: createId('peer'),
+      id,
       label: peer.value?.label ?? createDefaultLabel(),
       role,
       connectionState: 'idle',

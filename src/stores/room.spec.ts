@@ -25,6 +25,16 @@ describe('useRoomStore', () => {
     expect(roomStore.presenceEvents[0]?.type).toBe('host-created')
   })
 
+  it('creates a human-readable room code that matches the host peer id by default', () => {
+    const sessionStore = useSessionStore()
+    const roomStore = useRoomStore()
+    const roomId = roomStore.bootstrapHostedRoom()
+
+    expect(roomId).toMatch(/^[a-z]+-[a-z]+-\d{2}$/)
+    expect(roomStore.room?.hostPeerId).toBe(roomId)
+    expect(sessionStore.peer?.id).toBe(roomId)
+  })
+
   it('creates an optimistic pending chat message from the local draft', () => {
     const roomStore = useRoomStore()
 

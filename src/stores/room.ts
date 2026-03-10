@@ -4,6 +4,10 @@ import {
   createTransferFiles,
   validateTransferFiles,
 } from '@/lib/fileTransfer'
+import {
+  createHumanReadableId,
+  formatHumanReadableId,
+} from '@/lib/humanId'
 import { createId } from '@/lib/id'
 import { buildShareUrl } from '@/lib/roomLink'
 import type {
@@ -121,6 +125,10 @@ function validateChatBody(body: string) {
   }
 }
 
+function buildRoomName(prefix: 'Hosted room' | 'Join room', roomId: string) {
+  return `${prefix} ${formatHumanReadableId(roomId)}`
+}
+
 export const useRoomStore = defineStore('room', () => {
   const room = ref<RoomSummary | null>(loadStoredRoom())
   const members = ref<PeerIdentity[]>(loadStoredMembers())
@@ -151,12 +159,12 @@ export const useRoomStore = defineStore('room', () => {
     return
   }
 
-  function bootstrapHostedRoom(roomId = createId('room')) {
-    const host = sessionStore.rotatePeerIdentity('host')
+  function bootstrapHostedRoom(roomId = createHumanReadableId()) {
+    const host = sessionStore.rotatePeerIdentity('host', roomId)
     const now = new Date().toISOString()
     const hostedRoom: RoomSummary = {
       id: roomId,
-      name: `Hosted room ${roomId.slice(-4).toUpperCase()}`,
+      name: buildRoomName('Hosted room', roomId),
       hostPeerId: host.id,
       shareUrl: buildShareUrl(roomId, host.id),
       createdAt: now,
@@ -203,7 +211,7 @@ export const useRoomStore = defineStore('room', () => {
 
     room.value = {
       id: roomId,
-      name: `Join room ${roomId.slice(-4).toUpperCase()}`,
+      name: buildRoomName('Join room', roomId),
       hostPeerId,
       shareUrl: buildShareUrl(roomId, hostPeerId),
       createdAt: now,
