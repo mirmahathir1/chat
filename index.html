@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hosted P2P Chat</title>
+    <script>
+      ;(() => {
+        const url = new URL(window.location.href)
+        const redirectedRoute = url.searchParams.get('p2p_route')
+
+        if (!redirectedRoute || !redirectedRoute.startsWith('/')) {
+          return
+        }
+
+        window.history.replaceState(null, '', redirectedRoute)
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
