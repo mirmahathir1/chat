@@ -97,7 +97,7 @@ describe('app flows', () => {
     expect(router.currentRoute.value.name).toBe('home')
     expect(roomStore.room?.localMode).toBe('host')
     expect(signalingFns.ensureHost).toHaveBeenCalledWith(roomStore.room!.id)
-    expect(app.text()).toContain('Invite payload')
+    expect(app.text()).toContain('Room details')
     expect(app.text()).not.toContain('Create hosted room')
     expect(app.find('img[alt="QR code for the room invite link"]').exists()).toBe(true)
     expect(app.text()).not.toContain('Open join tab')

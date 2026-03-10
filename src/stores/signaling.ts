@@ -4,12 +4,16 @@ import Peer, {
 } from 'peerjs'
 import { defineStore } from 'pinia'
 import { computed, markRaw, ref, shallowRef } from 'vue'
-import {
-  assembleTransferBlob,
-  readFileInChunks,
-} from '@/lib/fileTransfer'
+import { readFileInChunks } from '@/lib/fileTransfer'
 import { mergeSyncedMessages } from '@/lib/messageSync'
 import { getPeerOptions } from '@/lib/peerConfig'
+import {
+  abortTransferStore,
+  closeTransferStore,
+  createIncomingTransferStore,
+  type TransferWritableStore,
+  writeTransferStoreChunk,
+} from '@/lib/transferStorage'
 import { useNotificationStore } from '@/stores/notifications'
 import { maxChatMessageBytes, useRoomStore } from '@/stores/room'
 import { useSessionStore } from '@/stores/session'
@@ -112,10 +116,12 @@ const maxRetryAttempts = 3
 
 interface IncomingFileBuffer {
   meta: TransferFile
-  chunks: Array<ArrayBuffer | undefined>
+  receivedChunkIndexes: Set<number>
   receivedChunks: number
   receivedBytes: number
   totalChunks: number
+  storePromise: Promise<TransferWritableStore>
+  writeChain: Promise<void>
 }
 
 interface IncomingTransferBuffer {
@@ -124,6 +130,7 @@ interface IncomingTransferBuffer {
   senderLabel: string
   totalBytes: number
   files: Map<string, IncomingFileBuffer>
+  failed: boolean
 }
 
 export const useSignalingStore = defineStore('signaling', () => {
@@ -174,6 +181,42 @@ export const useSignalingStore = defineStore('signaling', () => {
     retryTimer = null
   }
 
+  async function disposeIncomingTransfer(transfer: IncomingTransferBuffer) {
+    await Promise.all(
+      Array.from(transfer.files.values(), async (fileBuffer) => {
+        try {
+          await fileBuffer.writeChain
+        } catch (error) {
+          void error
+        }
+
+        const store = await fileBuffer.storePromise
+        await abortTransferStore(store)
+      })
+    )
+  }
+
+  function disposeIncomingTransfersForPeer(peerId: string) {
+    for (const [transferId, transfer] of incomingTransfers.entries()) {
+      if (transfer.senderId !== peerId) {
+        continue
+      }
+
+      incomingTransfers.delete(transferId)
+      void disposeIncomingTransfer(transfer)
+    }
+  }
+
+  function disposeAllIncomingTransfers() {
+    const transfers = Array.from(incomingTransfers.values())
+
+    incomingTransfers.clear()
+
+    for (const transfer of transfers) {
+      void disposeIncomingTransfer(transfer)
+    }
+  }
+
   function resetConnections() {
     hostConnection.value?.close()
     hostConnection.value = null
@@ -183,7 +226,7 @@ export const useSignalingStore = defineStore('signaling', () => {
     }
 
     memberConnections.value = {}
-    incomingTransfers.clear()
+    disposeAllIncomingTransfers()
     clearRetryTimer()
   }
 
@@ -487,7 +530,7 @@ export const useSignalingStore = defineStore('signaling', () => {
       }
 
       if (message.type === 'file-complete') {
-        finalizeIncomingTransfer(message.transferId)
+        void finalizeIncomingTransfer(message.transferId)
 
         return
       }
@@ -532,6 +575,7 @@ export const useSignalingStore = defineStore('signaling', () => {
     sessionStore.setConnectionState('disconnected')
     roomStore.syncLocalPeer()
     roomStore.updateRoomStatus('disconnected')
+    disposeAllIncomingTransfers()
     if (sessionStore.peer) {
       roomStore.failPendingMessagesForPeer(sessionStore.peer.id)
       roomStore.failTransfersForPeer(
@@ -914,7 +958,7 @@ export const useSignalingStore = defineStore('signaling', () => {
       }
 
       if (message.type === 'file-complete') {
-        finalizeIncomingTransfer(message.transferId)
+        void finalizeIncomingTransfer(message.transferId)
         broadcastToMembers(message, connection.peer)
       }
     })
@@ -959,11 +1003,7 @@ export const useSignalingStore = defineStore('signaling', () => {
           peerId,
           `${label} disconnected during the transfer.`
         )
-        for (const [transferId, transfer] of incomingTransfers.entries()) {
-          if (transfer.senderId === peerId) {
-            incomingTransfers.delete(transferId)
-          }
-        }
+        disposeIncomingTransfersForPeer(peerId)
       }
       broadcastRoomSync(connection.peer)
       broadcastPresenceEvent(
@@ -1091,13 +1131,16 @@ export const useSignalingStore = defineStore('signaling', () => {
           file.id,
           {
             meta: file,
-            chunks: [],
+            receivedChunkIndexes: new Set<number>(),
             receivedChunks: 0,
             receivedBytes: 0,
             totalChunks: 0,
+            storePromise: createIncomingTransferStore(file.id, file.name),
+            writeChain: Promise.resolve(),
           } satisfies IncomingFileBuffer,
         ])
       ),
+      failed: false,
     })
     roomStore.createIncomingTransfer(
       message.transferId,
@@ -1117,34 +1160,67 @@ export const useSignalingStore = defineStore('signaling', () => {
 
     const fileBuffer = transfer.files.get(message.fileId)
 
-    if (!fileBuffer || fileBuffer.chunks[message.chunkIndex]) {
+    if (
+      !fileBuffer ||
+      transfer.failed ||
+      fileBuffer.receivedChunkIndexes.has(message.chunkIndex)
+    ) {
       return
     }
 
-    fileBuffer.chunks[message.chunkIndex] = message.data
-    fileBuffer.receivedChunks += 1
-    fileBuffer.receivedBytes += message.data.byteLength
-    fileBuffer.totalChunks = message.totalChunks
+    fileBuffer.writeChain = fileBuffer.writeChain
+      .then(async () => {
+        if (transfer.failed || fileBuffer.receivedChunkIndexes.has(message.chunkIndex)) {
+          return
+        }
 
-    const receivedBytes = Array.from(transfer.files.values()).reduce(
-      (sum, currentFile) => sum + currentFile.receivedBytes,
-      0
-    )
-    const progress =
-      transfer.totalBytes > 0 ? (receivedBytes / transfer.totalBytes) * 100 : 0
+        const store = await fileBuffer.storePromise
 
-    roomStore.updateTransferProgress(message.transferId, progress)
+        await writeTransferStoreChunk(store, message.data)
+
+        fileBuffer.receivedChunkIndexes.add(message.chunkIndex)
+        fileBuffer.receivedChunks += 1
+        fileBuffer.receivedBytes += message.data.byteLength
+        fileBuffer.totalChunks = message.totalChunks
+
+        const receivedBytes = Array.from(transfer.files.values()).reduce(
+          (sum, currentFile) => sum + currentFile.receivedBytes,
+          0
+        )
+        const progress =
+          transfer.totalBytes > 0 ? (receivedBytes / transfer.totalBytes) * 100 : 0
+
+        roomStore.updateTransferProgress(message.transferId, progress)
+      })
+      .catch(async (error) => {
+        if (transfer.failed) {
+          return
+        }
+
+        transfer.failed = true
+        roomStore.failTransfer(
+          message.transferId,
+          error instanceof Error ? error.message : 'Failed to write the incoming file.'
+        )
+        incomingTransfers.delete(message.transferId)
+        await disposeIncomingTransfer(transfer)
+      })
   }
 
-  function finalizeIncomingTransfer(transferId: string) {
+  async function finalizeIncomingTransfer(transferId: string) {
     const transfer = incomingTransfers.get(transferId)
 
-    if (!transfer) {
+    if (!transfer || transfer.failed) {
       return
     }
 
     try {
-      const completedFiles = Array.from(transfer.files.values()).map((fileBuffer) => {
+      await Promise.all(
+        Array.from(transfer.files.values(), (fileBuffer) => fileBuffer.writeChain)
+      )
+
+      const completedFiles = await Promise.all(
+        Array.from(transfer.files.values(), async (fileBuffer) => {
         if (
           fileBuffer.totalChunks > 0 &&
           fileBuffer.receivedChunks !== fileBuffer.totalChunks
@@ -1152,17 +1228,18 @@ export const useSignalingStore = defineStore('signaling', () => {
           throw new Error(`${fileBuffer.meta.name} did not finish downloading.`)
         }
 
-        const chunks = fileBuffer.chunks.filter(
-          (chunk): chunk is ArrayBuffer => chunk instanceof ArrayBuffer
-        )
+          const store = await fileBuffer.storePromise
+          const completedFile = await closeTransferStore(store, {
+            fileName: fileBuffer.meta.name,
+            mimeType: fileBuffer.meta.mimeType,
+          })
 
-        return {
-          ...fileBuffer.meta,
-          downloadUrl: URL.createObjectURL(
-            assembleTransferBlob(chunks, fileBuffer.meta.mimeType)
-          ),
-        }
-      })
+          return {
+            ...fileBuffer.meta,
+            downloadUrl: URL.createObjectURL(completedFile),
+          }
+        })
+      )
 
       roomStore.completeTransfer(transferId, completedFiles)
       notificationStore.pushNotification({
@@ -1171,10 +1248,12 @@ export const useSignalingStore = defineStore('signaling', () => {
         tone: 'success',
       })
     } catch (error) {
+      transfer.failed = true
       roomStore.failTransfer(
         transferId,
         error instanceof Error ? error.message : 'File assembly failed.'
       )
+      await disposeIncomingTransfer(transfer)
     } finally {
       incomingTransfers.delete(transferId)
     }
@@ -1260,6 +1339,7 @@ export const useSignalingStore = defineStore('signaling', () => {
     sessionStore.setConnectionState('disconnected')
     roomStore.syncLocalPeer()
     roomStore.updateRoomStatus('disconnected')
+    disposeAllIncomingTransfers()
 
     if (sessionStore.peer) {
       roomStore.failPendingMessagesForPeer(sessionStore.peer.id)

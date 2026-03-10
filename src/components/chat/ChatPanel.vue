@@ -3,6 +3,15 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { formatBytes } from '@/lib/fileTransfer'
 import { splitTextWithLinks } from '@/lib/linkify'
 import { formatTimeLabel } from '@/lib/time'
+import {
+  buildSelectionFromDrop,
+  buildSelectionFromFileList,
+  describeUploadSelection,
+  prepareSelectionForUpload,
+  type PreparedUpload,
+  type UploadSelection,
+} from '@/lib/uploadSelection'
+import { useNotificationStore } from '@/stores/notifications'
 import type { ChatMessage, FileTransfer } from '@/types/chat'
 
 const props = defineProps<{
@@ -17,9 +26,10 @@ const props = defineProps<{
 const emit = defineEmits<{
   'update:draft': [value: string]
   send: []
-  'send-files': [files: File[]]
+  'send-files': [upload: PreparedUpload]
 }>()
 
+const notificationStore = useNotificationStore()
 const draftModel = computed({
   get: () => props.draft,
   set: (value: string) => emit('update:draft', value),
@@ -31,6 +41,16 @@ const draftInput = ref<HTMLTextAreaElement | null>(null)
 const transcriptList = ref<HTMLOListElement | null>(null)
 const isAtTranscriptBottom = ref(true)
 const showJumpToLatest = ref(false)
+const dragDepth = ref(0)
+const isDragTargetActive = ref(false)
+const pendingUploadSelection = ref<UploadSelection | null>(null)
+const uploadPromptMode = ref<'folder' | 'files' | null>(null)
+const isPreparingUpload = ref(false)
+const preparingUploadLabel = ref('')
+const isUploadDisabled = computed(
+  () => props.disabled || props.fileDisabled || isPreparingUpload.value
+)
+const isTranscriptEmpty = computed(() => transcriptItems.value.length === 0)
 const transcriptItems = computed(() =>
   [...props.messages, ...props.transfers]
     .map((item) =>
@@ -101,22 +121,20 @@ function openFilePicker() {
   fileInput.value?.click()
 }
 
-function emitSelectedFiles(fileList: FileList | null) {
-  if (!fileList) {
+async function emitSelectedFiles(fileList: FileList | null) {
+  if (!fileList || isUploadDisabled.value) {
     return
   }
 
-  const files = Array.from(fileList)
+  const selection = buildSelectionFromFileList(fileList)
 
-  if (files.length > 0) {
-    emit('send-files', files)
-  }
+  await queueUploadSelection(selection)
 }
 
-function handleFileInputChange(event: Event) {
+async function handleFileInputChange(event: Event) {
   const target = event.target as HTMLInputElement
 
-  emitSelectedFiles(target.files)
+  await emitSelectedFiles(target.files)
   target.value = ''
 }
 
@@ -131,6 +149,187 @@ function resizeDraftInput() {
 
   draftInput.value.style.height = '0px'
   draftInput.value.style.height = `${Math.min(draftInput.value.scrollHeight, 180)}px`
+}
+
+function shouldAcceptDrag(event: DragEvent) {
+  const dataTransfer = event.dataTransfer
+
+  if (!dataTransfer) {
+    return false
+  }
+
+  if (dataTransfer.items.length > 0) {
+    return Array.from(dataTransfer.items).some((item) => item.kind === 'file')
+  }
+
+  if (dataTransfer.files.length > 0) {
+    return true
+  }
+
+  return Array.from(dataTransfer.types ?? []).some(
+    (type) => type.toLowerCase() === 'files'
+  )
+}
+
+function handleDragEnd() {
+  dragDepth.value = 0
+  isDragTargetActive.value = false
+}
+
+function handleDisabledDrop() {
+  notificationStore.pushNotification({
+    title: 'Upload unavailable',
+    detail: props.fileDisabled
+      ? 'Connect another room member before sharing files.'
+      : 'File uploads are not available right now.',
+    tone: 'warning',
+  })
+}
+
+function handleDragEnter(event: DragEvent) {
+  if (!shouldAcceptDrag(event)) {
+    return
+  }
+
+  event.preventDefault()
+  dragDepth.value += 1
+  isDragTargetActive.value = true
+}
+
+function handleDragOver(event: DragEvent) {
+  if (!shouldAcceptDrag(event)) {
+    return
+  }
+
+  event.preventDefault()
+
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = isUploadDisabled.value ? 'none' : 'copy'
+  }
+
+  isDragTargetActive.value = true
+}
+
+function handleDragLeave(event: DragEvent) {
+  const currentTarget = event.currentTarget
+
+  if (
+    currentTarget instanceof HTMLElement &&
+    event.relatedTarget instanceof Node &&
+    currentTarget.contains(event.relatedTarget)
+  ) {
+    return
+  }
+
+  dragDepth.value = Math.max(0, dragDepth.value - 1)
+
+  if (dragDepth.value === 0) {
+    isDragTargetActive.value = false
+  }
+}
+
+async function handleDrop(event: DragEvent) {
+  if (!shouldAcceptDrag(event) || !event.dataTransfer) {
+    return
+  }
+
+  event.preventDefault()
+  dragDepth.value = 0
+  isDragTargetActive.value = false
+
+  if (isUploadDisabled.value) {
+    handleDisabledDrop()
+
+    return
+  }
+
+  try {
+    const selection = await buildSelectionFromDrop(event.dataTransfer)
+
+    await queueUploadSelection(selection)
+  } catch (error) {
+    notificationStore.pushNotification({
+      title: 'Upload not prepared',
+      detail:
+        error instanceof Error
+          ? error.message
+          : 'The dropped files could not be prepared.',
+      tone: 'warning',
+    })
+  }
+}
+
+async function queueUploadSelection(selection: UploadSelection) {
+  if (selection.entries.length === 0) {
+    notificationStore.pushNotification({
+      title: 'Upload not prepared',
+      detail: 'No files were found in that selection.',
+      tone: 'warning',
+    })
+
+    return
+  }
+
+  if (selection.folderCount > 0) {
+    pendingUploadSelection.value = selection
+    uploadPromptMode.value = 'folder'
+
+    return
+  }
+
+  if (selection.entries.length > 1) {
+    pendingUploadSelection.value = selection
+    uploadPromptMode.value = 'files'
+
+    return
+  }
+
+  emit('send-files', {
+    files: [selection.entries[0]!.file],
+  })
+}
+
+function clearUploadPrompt() {
+  pendingUploadSelection.value = null
+  uploadPromptMode.value = null
+}
+
+async function sendPendingUpload(mode: 'files' | 'zip') {
+  const selection = pendingUploadSelection.value
+
+  if (!selection) {
+    return
+  }
+
+  clearUploadPrompt()
+
+  try {
+    if (mode === 'files') {
+      emit('send-files', {
+        files: selection.entries.map((entry) => entry.file),
+      })
+
+      return
+    }
+
+    isPreparingUpload.value = true
+    preparingUploadLabel.value = describeUploadSelection(selection)
+    const preparedUpload = await prepareSelectionForUpload(selection, 'zip')
+
+    emit('send-files', preparedUpload)
+  } catch (error) {
+    notificationStore.pushNotification({
+      title: 'Upload not prepared',
+      detail:
+        error instanceof Error
+          ? error.message
+          : 'The upload could not be prepared.',
+      tone: 'warning',
+    })
+  } finally {
+    isPreparingUpload.value = false
+    preparingUploadLabel.value = ''
+  }
 }
 
 watch(
@@ -182,15 +381,38 @@ watch(
 </script>
 
 <template>
-  <section class="panel chat-panel">
+  <section
+    :class="[
+      'panel',
+      'chat-panel',
+      {
+        'chat-panel--drop-active': isDragTargetActive,
+      },
+    ]"
+    @dragenter.capture="handleDragEnter"
+    @dragover.capture="handleDragOver"
+    @dragleave.capture="handleDragLeave"
+    @dragend.capture="handleDragEnd"
+    @drop.capture="handleDrop"
+  >
     <div class="section-heading">
       <div>
         <p class="eyebrow">Chat</p>
-        <h2>Room transcript</h2>
       </div>
     </div>
 
+    <div
+      v-if="isDragTargetActive"
+      class="chat-panel__drop-overlay"
+      aria-hidden="true"
+    >
+      <p>Drop files or folders to upload them here.</p>
+    </div>
+
     <div class="chat-panel__transcript">
+      <p v-if="isTranscriptEmpty" class="chat-panel__empty-state">
+        Chat is currently empty
+      </p>
       <ol
         ref="transcriptList"
         class="chat-panel__list"
@@ -310,45 +532,103 @@ watch(
           class="chat-panel__draft-input"
           :disabled="disabled"
           :placeholder="
-              disabled
-                ? 'Chat unlocks once the host connection is ready.'
+            disabled
+              ? 'Chat unlocks once the host connection is ready.'
               : 'Type a room message...'
           "
           @input="resizeDraftInput"
           @keydown="handleComposerKeydown"
         />
-        <button
-          type="button"
-          class="chat-panel__action-button"
-          :disabled="fileDisabled"
-          aria-label="Attach files"
-          @click="openFilePicker"
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path
-              d="M8 12.5 14.86 5.64a4 4 0 1 1 5.66 5.66l-9.19 9.19a6 6 0 1 1-8.49-8.48l8.48-8.49"
-              fill="none"
-              stroke="currentColor"
+          <button
+            type="button"
+            class="chat-panel__action-button"
+            :disabled="isUploadDisabled"
+            aria-label="Attach files"
+            @click="openFilePicker"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              aria-hidden="true"
+              class="chat-panel__action-icon chat-panel__action-icon--attach"
+            >
+              <path
+                d="M8 12.5 14.86 5.64a4 4 0 1 1 5.66 5.66l-9.19 9.19a6 6 0 1 1-8.49-8.48l8.48-8.49"
+                fill="none"
+                stroke="currentColor"
               stroke-linecap="round"
               stroke-linejoin="round"
               stroke-width="1.8"
             />
           </svg>
         </button>
-        <button
-          type="button"
-          class="chat-panel__action-button chat-panel__action-button--send"
-          :disabled="disabled || !hasDraft"
-          aria-label="Send message"
-          @click="$emit('send')"
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path
-              d="M4 12 20 4 14 20 11 13 4 12Z"
-              fill="currentColor"
-            />
-          </svg>
-        </button>
+          <button
+            type="button"
+            class="chat-panel__action-button chat-panel__action-button--send"
+            :disabled="disabled || !hasDraft"
+            aria-label="Send message"
+            @click="$emit('send')"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              aria-hidden="true"
+              class="chat-panel__action-icon chat-panel__action-icon--send"
+            >
+              <path d="M4 12 20 4 14 20 11 13 4 12Z" fill="currentColor" />
+            </svg>
+          </button>
+        </div>
+    </div>
+
+    <div
+      v-if="uploadPromptMode || isPreparingUpload"
+      class="chat-panel__modal-backdrop"
+    >
+      <div class="chat-panel__modal">
+        <template v-if="isPreparingUpload">
+          <p class="eyebrow">Preparing upload</p>
+          <h3>Creating zip archive...</h3>
+          <p>
+            {{ preparingUploadLabel || 'Selected files' }}
+          </p>
+        </template>
+        <template v-else-if="uploadPromptMode === 'folder'">
+          <p class="eyebrow">Upload choice</p>
+          <h3>Folder detected. Zip all?</h3>
+          <p>
+            Folders are zipped before sending so the folder structure stays intact.
+          </p>
+          <div class="chat-panel__modal-actions">
+            <button type="button" @click="sendPendingUpload('zip')">
+              Continue
+            </button>
+            <button
+              type="button"
+              class="secondary-button"
+              @click="clearUploadPrompt"
+            >
+              Cancel Upload
+            </button>
+          </div>
+        </template>
+        <template v-else-if="uploadPromptMode === 'files'">
+          <p class="eyebrow">Upload choice</p>
+          <h3>Zip all files together?</h3>
+          <p>
+            {{ pendingUploadSelection ? describeUploadSelection(pendingUploadSelection) : '' }}
+          </p>
+          <div class="chat-panel__modal-actions">
+            <button type="button" @click="sendPendingUpload('zip')">
+              Yes
+            </button>
+            <button
+              type="button"
+              class="secondary-button"
+              @click="sendPendingUpload('files')"
+            >
+              No
+            </button>
+          </div>
+        </template>
       </div>
     </div>
   </section>
@@ -356,11 +636,19 @@ watch(
 
 <style scoped>
 .chat-panel {
+  position: relative;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   min-height: 0;
   padding: 1.25rem;
   overflow: hidden;
+}
+
+.chat-panel--drop-active {
+  border-color: rgba(242, 164, 99, 0.48);
+  background:
+    linear-gradient(180deg, rgba(242, 164, 99, 0.08), rgba(255, 255, 255, 0.03)),
+    var(--surface-strong);
 }
 
 .section-heading {
@@ -395,6 +683,33 @@ h2 {
   min-height: 0;
   overflow: hidden;
   padding-top: 1.25rem;
+}
+
+.chat-panel__empty-state {
+  margin: auto 0;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.chat-panel__drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  border: 2px dashed rgba(242, 164, 99, 0.72);
+  border-radius: 1.5rem;
+  background: rgba(20, 12, 10, 0.86);
+  color: var(--text-main);
+  pointer-events: none;
+}
+
+.chat-panel__drop-overlay p {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  text-align: center;
 }
 
 .chat-panel__message {
@@ -522,7 +837,7 @@ h2 {
   flex: 1;
   min-height: 3rem;
   max-height: 11.25rem;
-  padding: 0.65rem 0;
+  padding: 0.75rem 0;
   border: 0;
   background: transparent;
   resize: none;
@@ -538,17 +853,29 @@ h2 {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 4.25rem;
-  height: 4.25rem;
+  width: 2.9rem;
+  height: 2.9rem;
+  overflow: visible;
   border: 1px solid var(--border-strong);
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.06);
   color: var(--text-main);
 }
 
-.chat-panel__action-button svg {
-  width: 1.9rem;
-  height: 1.9rem;
+.chat-panel__action-icon {
+  width: 2.05rem;
+  height: 2.05rem;
+  overflow: visible;
+}
+
+.chat-panel__action-icon--attach {
+  transform: scale(0.8);
+  transform-origin: center;
+}
+
+.chat-panel__action-icon--send {
+  transform: scale(1.2);
+  transform-origin: center;
 }
 
 .chat-panel__action-button--send {
@@ -558,6 +885,46 @@ h2 {
 
 .chat-panel__action-button:disabled {
   opacity: 0.45;
+}
+
+.chat-panel__modal-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgba(8, 5, 4, 0.72);
+  backdrop-filter: blur(8px);
+}
+
+.chat-panel__modal {
+  width: min(100%, 24rem);
+  padding: 1.25rem;
+  border: 1px solid var(--border);
+  border-radius: 1.25rem;
+  background: rgba(28, 20, 18, 0.96);
+  box-shadow: var(--shadow);
+}
+
+.chat-panel__modal h3 {
+  margin: 0.3rem 0 0.45rem;
+  font-size: 1.2rem;
+}
+
+.chat-panel__modal p {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.chat-panel__modal-actions {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.chat-panel__modal-actions > * {
+  flex: 1;
 }
 
 @media (max-width: 720px) {
@@ -570,6 +937,10 @@ h2 {
 
   .chat-panel__composer-bar {
     gap: 0.75rem;
+  }
+
+  .chat-panel__modal-actions {
+    flex-direction: column;
   }
 }
 </style>

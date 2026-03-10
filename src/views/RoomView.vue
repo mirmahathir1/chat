@@ -6,6 +6,7 @@ import ChatPanel from '@/components/chat/ChatPanel.vue'
 import NotificationPanel from '@/components/notifications/NotificationPanel.vue'
 import MembersPanel from '@/components/room/MembersPanel.vue'
 import SharePanel from '@/components/room/SharePanel.vue'
+import type { PreparedUpload } from '@/lib/uploadSelection'
 import { getHostPeerIdFromQuery, isGeneratedId } from '@/lib/roomLink'
 import { useNotificationStore } from '@/stores/notifications'
 import { useRoomStore } from '@/stores/room'
@@ -199,8 +200,12 @@ function sendDraftMessage() {
   signalingStore.sendDraftMessage()
 }
 
-function sendFiles(files: File[]) {
-  void signalingStore.sendFiles(files)
+async function sendFiles(upload: PreparedUpload) {
+  try {
+    await signalingStore.sendFiles(upload.files)
+  } finally {
+    await upload.cleanup?.()
+  }
 }
 </script>
 

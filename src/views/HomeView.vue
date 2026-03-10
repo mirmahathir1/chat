@@ -50,13 +50,7 @@ function retryHost() {
 <template>
   <main class="page-shell home-view">
     <section class="panel home-view__launchpad">
-      <p class="eyebrow">Room host</p>
       <h2>Scan this code to join the live room.</h2>
-
-      <p class="home-view__launch-copy">
-        The host is already listening. Scan the QR, and both browsers move into
-        the room automatically.
-      </p>
 
       <div v-if="!isReady" class="home-view__status">
         <p v-if="errorMessage">{{ errorMessage }}</p>
@@ -76,7 +70,7 @@ function retryHost() {
         </button>
       </div>
 
-      <SharePanel v-if="room && isReady" :room="room" />
+      <SharePanel v-if="room && isReady" :room="room" :show-header="false" />
     </section>
   </main>
 </template>
@@ -97,12 +91,6 @@ function retryHost() {
 h2 {
   margin: 0.35rem 0 0;
   font-size: 1.5rem;
-}
-
-.home-view__launch-copy {
-  margin: 1rem 0 0;
-  color: var(--text-muted);
-  line-height: 1.7;
 }
 
 .home-view__status {

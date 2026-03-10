@@ -1,9 +1,9 @@
 import { createId } from '@/lib/id'
 import type { TransferFile } from '@/types/chat'
 
-export const maxTransferFiles = 5
-export const maxTransferFileBytes = 10 * 1024 * 1024
-export const maxTransferTotalBytes = 25 * 1024 * 1024
+export const maxTransferFiles = 500
+export const maxTransferFileBytes = Number.POSITIVE_INFINITY
+export const maxTransferTotalBytes = Number.POSITIVE_INFINITY
 export const transferChunkBytes = 12 * 1024
 
 export interface TransferValidationResult {
@@ -31,27 +31,7 @@ export function validateTransferFiles(files: File[]) {
     } satisfies TransferValidationResult
   }
 
-  const oversizedFile = selectedFiles.find(
-    (file) => file.size > maxTransferFileBytes
-  )
-
-  if (oversizedFile) {
-    return {
-      files: null,
-      error: `${oversizedFile.name} exceeds the ${formatBytes(maxTransferFileBytes)} file limit.`,
-      totalBytes: 0,
-    } satisfies TransferValidationResult
-  }
-
   const totalBytes = selectedFiles.reduce((sum, file) => sum + file.size, 0)
-
-  if (totalBytes > maxTransferTotalBytes) {
-    return {
-      files: null,
-      error: `Transfers must stay under ${formatBytes(maxTransferTotalBytes)} total.`,
-      totalBytes,
-    } satisfies TransferValidationResult
-  }
 
   return {
     files: selectedFiles,

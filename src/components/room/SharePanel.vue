@@ -3,9 +3,15 @@ import QRCode from 'qrcode'
 import { computed, ref, watchEffect } from 'vue'
 import type { RoomSummary } from '@/types/chat'
 
-const props = defineProps<{
-  room: RoomSummary
-}>()
+const props = withDefaults(
+  defineProps<{
+    room: RoomSummary
+    showHeader?: boolean
+  }>(),
+  {
+    showHeader: true,
+  }
+)
 
 const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
 const qrDataUrl = ref('')
@@ -54,8 +60,10 @@ async function copyShareLink() {
 </script>
 
 <template>
-  <section class="panel share-panel">
-    <div class="section-heading">
+  <section
+    :class="['panel', 'share-panel', { 'share-panel--headerless': !showHeader }]"
+  >
+    <div v-if="showHeader" class="section-heading">
       <div>
         <p class="eyebrow">Share</p>
         <h2>{{ room.localMode === 'host' ? 'Invite payload' : 'Loaded invite' }}</h2>
@@ -67,21 +75,25 @@ async function copyShareLink() {
       <img :src="qrDataUrl" alt="QR code for the room invite link" />
     </div>
 
-    <div class="share-panel__fields">
-      <div
-        v-for="field in shareFields"
-        :key="field.label"
-        class="share-panel__field"
-      >
-        <span>{{ field.label }}</span>
-        <code>{{ field.value }}</code>
-      </div>
-    </div>
+    <details class="share-panel__details">
+      <summary class="share-panel__summary">Room details</summary>
 
-    <label class="share-panel__url">
-      <span>Share URL</span>
-      <textarea readonly :value="room.shareUrl" rows="3" />
-    </label>
+      <div class="share-panel__fields">
+        <div
+          v-for="field in shareFields"
+          :key="field.label"
+          class="share-panel__field"
+        >
+          <span>{{ field.label }}</span>
+          <code>{{ field.value }}</code>
+        </div>
+      </div>
+
+      <label class="share-panel__url">
+        <span>Share URL</span>
+        <textarea readonly :value="room.shareUrl" rows="3" />
+      </label>
+    </details>
 
     <div class="share-panel__actions">
       <button type="button" @click="copyShareLink">
@@ -99,6 +111,10 @@ async function copyShareLink() {
 <style scoped>
 .share-panel {
   padding: 1.25rem;
+}
+
+.share-panel--headerless .share-panel__qr {
+  margin-top: 0;
 }
 
 .section-heading {
@@ -140,10 +156,22 @@ h2 {
   max-width: 16rem;
 }
 
+.share-panel__details {
+  margin-top: 1rem;
+}
+
+.share-panel__summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 .share-panel__fields {
   display: grid;
   gap: 0.75rem;
-  margin-top: 1rem;
+  margin-top: 0.9rem;
 }
 
 .share-panel__field {
