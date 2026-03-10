@@ -8,8 +8,8 @@ const props = defineProps<{
 }>()
 
 const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
-const qrVisible = ref(props.room.localMode === 'host')
 const qrDataUrl = ref('')
+const isHostView = computed(() => props.room.localMode === 'host')
 
 const shareFields = computed(() => [
   {
@@ -23,7 +23,9 @@ const shareFields = computed(() => [
 ])
 
 watchEffect(async () => {
-  if (!qrVisible.value) {
+  if (!isHostView.value) {
+    qrDataUrl.value = ''
+
     return
   }
 
@@ -49,10 +51,6 @@ async function copyShareLink() {
     copyState.value = 'failed'
   }
 }
-
-function toggleQr() {
-  qrVisible.value = !qrVisible.value
-}
 </script>
 
 <template>
@@ -62,14 +60,11 @@ function toggleQr() {
         <p class="eyebrow">Share</p>
         <h2>{{ room.localMode === 'host' ? 'Invite payload' : 'Loaded invite' }}</h2>
       </div>
-      <span class="phase-chip">Phase 2 live</span>
+      <span class="phase-chip">Invite link</span>
     </div>
 
-    <div v-if="qrVisible" class="share-panel__qr">
+    <div v-if="isHostView" class="share-panel__qr">
       <img :src="qrDataUrl" alt="QR code for the room invite link" />
-    </div>
-    <div v-else class="share-panel__qr-placeholder">
-      <span>QR hidden until needed</span>
     </div>
 
     <div class="share-panel__fields">
@@ -91,9 +86,6 @@ function toggleQr() {
     <div class="share-panel__actions">
       <button type="button" @click="copyShareLink">
         {{ copyState === 'copied' ? 'Link copied' : 'Copy join link' }}
-      </button>
-      <button type="button" class="secondary-button" @click="toggleQr">
-        {{ qrVisible ? 'Hide QR' : 'Show QR' }}
       </button>
     </div>
 
@@ -127,26 +119,6 @@ h2 {
   padding: 0.4rem 0.7rem;
   color: var(--text-muted);
   font-size: 0.82rem;
-}
-
-.share-panel__qr-placeholder {
-  display: grid;
-  place-items: center;
-  aspect-ratio: 1;
-  margin-top: 1.25rem;
-  border: 1px dashed var(--border-strong);
-  border-radius: 1.5rem;
-  background:
-    linear-gradient(
-      135deg,
-      rgba(255, 181, 117, 0.12),
-      rgba(236, 105, 65, 0.08)
-    ),
-    rgba(255, 255, 255, 0.02);
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-size: 0.78rem;
 }
 
 .share-panel__qr {
@@ -205,6 +177,7 @@ textarea {
 
 .share-panel__actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.75rem;
   margin-top: 1rem;
 }

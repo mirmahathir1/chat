@@ -11,15 +11,17 @@ describe('useRoomStore', () => {
   it('bootstraps a hosted room using the local session as the host', () => {
     const sessionStore = useSessionStore()
     const roomStore = useRoomStore()
+    const previousPeerId = sessionStore.ensureSession('member').id
     const roomId = roomStore.bootstrapHostedRoom('room-phase1')
 
     expect(roomId).toBe('room-phase1')
     expect(roomStore.room?.id).toBe('room-phase1')
     expect(roomStore.members).toHaveLength(1)
+    expect(sessionStore.peer?.id).not.toBe(previousPeerId)
     expect(roomStore.members[0]?.id).toBe(sessionStore.peer?.id)
     expect(roomStore.members[0]?.role).toBe('host')
     expect(roomStore.room?.localMode).toBe('host')
-    expect(roomStore.messages.length).toBeGreaterThan(0)
+    expect(roomStore.messages).toEqual([])
     expect(roomStore.presenceEvents[0]?.type).toBe('host-created')
   })
 
@@ -56,16 +58,18 @@ describe('useRoomStore', () => {
   it('prepares a scanned room link as a join-ready room instead of hosting it', () => {
     const sessionStore = useSessionStore()
     const roomStore = useRoomStore()
+    const originalPeerId = sessionStore.ensureSession('host').id
 
     roomStore.prepareJoinRoom('room-phase2', 'peer-hosted')
 
     expect(sessionStore.peer?.role).toBe('member')
+    expect(sessionStore.peer?.id).not.toBe(originalPeerId)
     expect(roomStore.room?.id).toBe('room-phase2')
     expect(roomStore.room?.hostPeerId).toBe('peer-hosted')
     expect(roomStore.room?.localMode).toBe('join')
     expect(roomStore.room?.shareUrl).toContain('/room/room-phase2?host=peer-hosted')
     expect(roomStore.members).toHaveLength(2)
-    expect(roomStore.messages[0]?.kind).toBe('system')
+    expect(roomStore.messages).toEqual([])
   })
 
   it('updates tracked members and room status during signaling events', () => {
@@ -159,5 +163,20 @@ describe('useRoomStore', () => {
 
     expect(roomStore.transfers[0]?.status).toBe('completed')
     expect(roomStore.transfers[0]?.progress).toBe(100)
+  })
+
+  it('clears the room state completely when the lobby is reopened', () => {
+    const roomStore = useRoomStore()
+
+    roomStore.bootstrapHostedRoom('room-phase8')
+    roomStore.updateDraftMessage('temporary draft')
+    roomStore.clearRoom()
+
+    expect(roomStore.room).toBeNull()
+    expect(roomStore.members).toEqual([])
+    expect(roomStore.messages).toEqual([])
+    expect(roomStore.presenceEvents).toEqual([])
+    expect(roomStore.transfers).toEqual([])
+    expect(roomStore.draftMessage).toBe('')
   })
 })

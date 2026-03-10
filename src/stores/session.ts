@@ -3,7 +3,6 @@ import { computed, ref } from 'vue'
 import { createId } from '@/lib/id'
 import type { ConnectionState, PeerIdentity, PeerRole } from '@/types/chat'
 
-const sessionStorageKey = 'hosted-p2p-chat/session'
 const defaultNames = [
   'Atlas Desk',
   'Copper Relay',
@@ -18,30 +17,14 @@ function createDefaultLabel() {
 }
 
 export const useSessionStore = defineStore('session', () => {
-  const peer = ref<PeerIdentity | null>(loadStoredPeer())
-  const createdAt = ref<string | null>(loadStoredCreatedAt())
+  const peer = ref<PeerIdentity | null>(null)
+  const createdAt = ref<string | null>(null)
   const deviceLabel = ref('This browser')
 
   const isReady = computed(() => peer.value !== null)
 
   function persistSession() {
-    if (typeof window === 'undefined') {
-      return
-    }
-
-    if (!peer.value || !createdAt.value) {
-      window.localStorage.removeItem(sessionStorageKey)
-
-      return
-    }
-
-    window.localStorage.setItem(
-      sessionStorageKey,
-      JSON.stringify({
-        peer: peer.value,
-        createdAt: createdAt.value,
-      })
-    )
+    return
   }
 
   function ensureSession(role: PeerRole = 'host') {
@@ -124,6 +107,11 @@ export const useSessionStore = defineStore('session', () => {
     return nextPeer
   }
 
+  function clearSession() {
+    peer.value = null
+    createdAt.value = null
+  }
+
   return {
     peer,
     createdAt,
@@ -134,36 +122,6 @@ export const useSessionStore = defineStore('session', () => {
     setConnectionState,
     setRole,
     rotatePeerIdentity,
+    clearSession,
   }
 })
-
-function loadStoredSession() {
-  if (typeof window === 'undefined') {
-    return null
-  }
-
-  const raw = window.localStorage.getItem(sessionStorageKey)
-
-  if (!raw) {
-    return null
-  }
-
-  try {
-    return JSON.parse(raw) as {
-      peer?: PeerIdentity
-      createdAt?: string
-    }
-  } catch {
-    window.localStorage.removeItem(sessionStorageKey)
-
-    return null
-  }
-}
-
-function loadStoredPeer() {
-  return loadStoredSession()?.peer ?? null
-}
-
-function loadStoredCreatedAt() {
-  return loadStoredSession()?.createdAt ?? null
-}

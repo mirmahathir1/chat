@@ -8,6 +8,7 @@ import {
   assembleTransferBlob,
   readFileInChunks,
 } from '@/lib/fileTransfer'
+import { mergeSyncedMessages } from '@/lib/messageSync'
 import { getPeerOptions } from '@/lib/peerConfig'
 import { useNotificationStore } from '@/stores/notifications'
 import { maxChatMessageBytes, useRoomStore } from '@/stores/room'
@@ -35,6 +36,7 @@ interface HostWelcomeMessage {
   host: Pick<PeerIdentity, 'id' | 'label' | 'joinedAt'>
   members: PeerIdentity[]
   presenceEvents: PresenceEvent[]
+  messages: ChatMessage[]
 }
 
 interface RoomSyncMessage {
@@ -185,10 +187,16 @@ export const useSignalingStore = defineStore('signaling', () => {
     clearRetryTimer()
   }
 
-  function destroyPeer() {
+  function destroyPeer(resetContext = true) {
     resetConnections()
     peer.value?.destroy()
     peer.value = null
+    if (resetContext) {
+      mode.value = null
+      activeRoomId.value = null
+      hostPeerId.value = null
+      retryCount.value = 0
+    }
     lastPresenceNotificationKey.value = null
     setState('idle')
   }
@@ -197,11 +205,17 @@ export const useSignalingStore = defineStore('signaling', () => {
     bindWindowListeners()
     const localPeer = sessionStore.ensureSession(nextMode === 'host' ? 'host' : 'member')
 
-    if (peer.value && !peer.value.destroyed && peer.value.id === localPeer.id) {
+    if (
+      peer.value &&
+      !peer.value.destroyed &&
+      peer.value.id === localPeer.id &&
+      state.value !== 'error' &&
+      state.value !== 'disconnected'
+    ) {
       return peer.value
     }
 
-    destroyPeer()
+    destroyPeer(false)
 
     const nextPeer = markRaw(new Peer(localPeer.id, getPeerOptions()))
 
@@ -383,7 +397,6 @@ export const useSignalingStore = defineStore('signaling', () => {
       roomStore.syncLocalPeer()
       roomStore.updateRoomStatus('active')
       roomStore.updateMemberConnectionState(hostPeerId.value!, 'connected')
-      roomStore.appendSystemMessage('Connected to the host through the signaling layer.')
       notificationStore.pushNotification({
         title: 'Connected to host',
         detail: `Peer channel is open with host ${connection.peer}.`,
@@ -428,6 +441,9 @@ export const useSignalingStore = defineStore('signaling', () => {
       roomStore.replacePresenceEvents(message.presenceEvents)
 
       if (message.type === 'host-welcome') {
+        roomStore.replaceMessages(
+          mergeSyncedMessages(roomStore.messages, message.messages)
+        )
         roomStore.upsertMember({
           id: message.host.id,
           label: message.host.label,
@@ -784,15 +800,21 @@ export const useSignalingStore = defineStore('signaling', () => {
         : connection.peer
 
     let didDisconnect = false
+    let didActivate = false
 
-    connection.on('open', () => {
+    function activateMemberConnection(nextPeerId = peerId, nextLabel = label, nextJoinedAt = joinedAt) {
+      if (didActivate) {
+        return
+      }
+
+      didActivate = true
       const duplicateConnection = memberConnections.value[connection.peer]
 
       if (duplicateConnection && duplicateConnection !== connection) {
         connection.close()
         notificationStore.pushNotification({
           title: 'Duplicate join ignored',
-          detail: `${label} already has an active connection in this room.`,
+          detail: `${nextLabel} already has an active connection in this room.`,
           tone: 'warning',
         })
 
@@ -805,21 +827,21 @@ export const useSignalingStore = defineStore('signaling', () => {
       }
 
       roomStore.upsertMember({
-        id: peerId,
-        label,
+        id: nextPeerId,
+        label: nextLabel,
         role: 'member',
         connectionState: 'connected',
-        joinedAt,
+        joinedAt: nextJoinedAt,
       })
       const presenceEvent = roomStore.recordPresenceEvent(
         'joined',
-        peerId,
-        label,
+        nextPeerId,
+        nextLabel,
         new Date().toISOString()
       )
       notificationStore.pushNotification({
         title: 'Peer joined',
-        detail: `${label} connected to the host channel.`,
+        detail: `${nextLabel} connected to the host channel.`,
         tone: 'success',
       })
       connection.send({
@@ -832,6 +854,7 @@ export const useSignalingStore = defineStore('signaling', () => {
         },
         members: roomStore.members,
         presenceEvents: roomStore.presenceEvents,
+        messages: roomStore.messages,
       } satisfies HostWelcomeMessage)
       broadcastRoomSync()
       broadcastPresenceEvent({
@@ -841,6 +864,10 @@ export const useSignalingStore = defineStore('signaling', () => {
         createdAt: presenceEvent.createdAt,
       })
       setState('connected')
+    }
+
+    connection.on('open', () => {
+      activateMemberConnection()
     })
 
     connection.on('data', (message) => {
@@ -849,6 +876,11 @@ export const useSignalingStore = defineStore('signaling', () => {
       }
 
       if (message.type === 'member-hello') {
+        activateMemberConnection(
+          message.peer.id,
+          message.peer.label,
+          message.peer.joinedAt
+        )
         roomStore.upsertMember({
           id: message.peer.id,
           label: message.peer.label,
@@ -949,6 +981,10 @@ export const useSignalingStore = defineStore('signaling', () => {
     connection.on('error', () => {
       handleDisconnect()
     })
+
+    if (connection.open) {
+      activateMemberConnection()
+    }
   }
 
   return {

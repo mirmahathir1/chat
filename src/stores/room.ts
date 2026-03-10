@@ -18,7 +18,6 @@ import type {
 import { useNotificationStore } from '@/stores/notifications'
 import { useSessionStore } from '@/stores/session'
 
-const roomStorageKey = 'hosted-p2p-chat/room'
 export const maxChatMessageBytes = 2048
 
 interface DraftMessageResult {
@@ -52,8 +51,18 @@ function buildInitialNotifications(
     {
       id: createId('notification'),
       title: 'Hosted room ready',
-      detail: `${host.label} is the current host for room ${room.id}.`,
+      detail:
+        'Hosted room is live. Scan the QR code from another device to open the join flow for this room.',
       tone: 'success',
+      createdAt: room.createdAt,
+      seen: false,
+    },
+    {
+      id: createId('notification'),
+      title: 'Chat ready',
+      detail:
+        'Text chat is live. The host relays messages across the room through the signaling channel.',
+      tone: 'info',
       createdAt: room.createdAt,
       seen: false,
     },
@@ -61,7 +70,7 @@ function buildInitialNotifications(
       id: createId('notification'),
       title: 'Share link is ready',
       detail:
-        'Use the QR or room URL to open the join screen on another device.',
+        `${host.label} is the current host for room ${room.id}.`,
       tone: 'info',
       createdAt: room.createdAt,
       seen: false,
@@ -139,29 +148,11 @@ export const useRoomStore = defineStore('room', () => {
   const isJoinView = computed(() => room.value?.localMode === 'join')
 
   function persistRoomState() {
-    if (typeof window === 'undefined') {
-      return
-    }
-
-    if (!room.value) {
-      window.localStorage.removeItem(roomStorageKey)
-
-      return
-    }
-
-    window.localStorage.setItem(
-      roomStorageKey,
-      JSON.stringify({
-        room: room.value,
-        members: members.value,
-        messages: messages.value,
-        presenceEvents: presenceEvents.value,
-      })
-    )
+    return
   }
 
   function bootstrapHostedRoom(roomId = createId('room')) {
-    const host = sessionStore.ensureSession('host')
+    const host = sessionStore.rotatePeerIdentity('host')
     const now = new Date().toISOString()
     const hostedRoom: RoomSummary = {
       id: roomId,
@@ -194,21 +185,7 @@ export const useRoomStore = defineStore('room', () => {
       },
     ]
     transfers.value = []
-    messages.value = [
-      buildSystemMessage(
-        'Hosted room is live. Scan the QR code from another device to open the join flow for this room.',
-        now
-      ),
-      {
-        id: createId('message'),
-        kind: 'text',
-        senderId: host.id,
-        senderLabel: host.label,
-        body: 'Phase 5 text chat is live. The host now relays messages across the room through the signaling channel.',
-        createdAt: now,
-        status: 'sent',
-      },
-    ]
+    messages.value = []
     transfers.value = []
     draftMessage.value = ''
     notificationStore.replaceAll(buildInitialNotifications(host, hostedRoom))
@@ -218,7 +195,7 @@ export const useRoomStore = defineStore('room', () => {
   }
 
   function prepareJoinRoom(roomId: string, hostPeerId: string) {
-    const localPeer = sessionStore.ensureSession('member')
+    const localPeer = sessionStore.rotatePeerIdentity('member')
     const now = new Date().toISOString()
 
     sessionStore.setRole('member')
@@ -256,12 +233,7 @@ export const useRoomStore = defineStore('room', () => {
         createdAt: now,
       },
     ]
-    messages.value = [
-      buildSystemMessage(
-        'Invite accepted locally. The room will unlock chat once the host connection is ready.',
-        now
-      ),
-    ]
+    messages.value = []
     transfers.value = []
     draftMessage.value = ''
     notificationStore.replaceAll([
@@ -683,6 +655,15 @@ export const useRoomStore = defineStore('room', () => {
     draftMessage.value = value
   }
 
+  function clearRoom() {
+    room.value = null
+    members.value = []
+    messages.value = []
+    presenceEvents.value = []
+    transfers.value = []
+    draftMessage.value = ''
+  }
+
   return {
     room,
     members,
@@ -722,46 +703,22 @@ export const useRoomStore = defineStore('room', () => {
     markMessageStatus,
     failPendingMessagesForPeer,
     updateDraftMessage,
+    clearRoom,
   }
 })
 
-function loadStoredRoomState() {
-  if (typeof window === 'undefined') {
-    return null
-  }
-
-  const raw = window.localStorage.getItem(roomStorageKey)
-
-  if (!raw) {
-    return null
-  }
-
-  try {
-    return JSON.parse(raw) as {
-      room?: RoomSummary
-      members?: PeerIdentity[]
-      messages?: ChatMessage[]
-      presenceEvents?: PresenceEvent[]
-    }
-  } catch {
-    window.localStorage.removeItem(roomStorageKey)
-
-    return null
-  }
-}
-
 function loadStoredRoom() {
-  return loadStoredRoomState()?.room ?? null
+  return null
 }
 
 function loadStoredMembers() {
-  return loadStoredRoomState()?.members ?? []
+  return []
 }
 
 function loadStoredMessages() {
-  return loadStoredRoomState()?.messages ?? []
+  return []
 }
 
 function loadStoredPresenceEvents() {
-  return loadStoredRoomState()?.presenceEvents ?? []
+  return []
 }
