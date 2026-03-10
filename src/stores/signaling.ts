@@ -462,14 +462,19 @@ export const useSignalingStore = defineStore('signaling', () => {
     })
 
     connection.on('close', () => {
-      if (hostConnection.value === connection) {
-        hostConnection.value = null
+      if (hostConnection.value !== connection) {
+        return
       }
 
+      hostConnection.value = null
       handleJoinDisconnect('The host connection closed.')
     })
 
     connection.on('error', (error) => {
+      if (hostConnection.value !== connection) {
+        return
+      }
+
       handleJoinDisconnect(formatPeerError(error))
     })
   }
@@ -573,7 +578,6 @@ export const useSignalingStore = defineStore('signaling', () => {
 
   function handleJoinDisconnect(reason: string) {
     clearRetryTimer()
-    retryCount.value = 0
     sessionStore.setConnectionState('disconnected')
     roomStore.syncLocalPeer()
     roomStore.updateRoomStatus('disconnected')
@@ -596,6 +600,8 @@ export const useSignalingStore = defineStore('signaling', () => {
       detail: reason,
       tone: 'warning',
     })
+
+    scheduleRetry()
   }
 
   function scheduleRetry() {

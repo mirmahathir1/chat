@@ -110,11 +110,13 @@ const canRetryJoin = computed(
     !joinLinkIssue.value &&
     (signalingState.value === 'connecting' ||
       signalingState.value === 'retrying' ||
+      signalingState.value === 'disconnected' ||
       signalingState.value === 'error')
 )
 const showJoinBanner = computed(() => hasJoinQuery.value)
 const showHostDisconnectedModal = computed(
-  () => room.value?.localMode === 'join' && room.value.status === 'disconnected'
+  () =>
+    room.value?.localMode === 'join' && room.value.status === 'disconnected'
 )
 const hostDisconnectedDetail = computed(
   () => errorMessage.value ?? 'The host is no longer connected to this room.'
@@ -408,7 +410,9 @@ async function sendFiles(upload: PreparedUpload) {
         <p class="eyebrow">Connection lost</p>
         <h2 id="host-disconnected-title">Host Disconnected</h2>
         <p>{{ hostDisconnectedDetail }}</p>
-        <button type="button" @click="goBack">Return to Home</button>
+        <div class="room-view__join-actions">
+          <button type="button" @click="goBack">Return to Home</button>
+        </div>
       </section>
     </div>
   </main>
@@ -527,6 +531,7 @@ async function sendFiles(upload: PreparedUpload) {
 
 .room-view__modal {
   width: min(28rem, 100%);
+  padding: 2.5rem 2.75rem;
   text-align: center;
 }
 
@@ -536,6 +541,10 @@ async function sendFiles(upload: PreparedUpload) {
 
 .room-view__modal p:last-of-type {
   margin-bottom: 1.25rem;
+}
+
+.room-view__modal .room-view__join-actions {
+  justify-content: center;
 }
 
 .room-view__drawer--left {
@@ -712,6 +721,10 @@ async function sendFiles(upload: PreparedUpload) {
   .room-view__join-banner,
   .room-view__empty-state {
     padding: 1rem;
+  }
+
+  .room-view__modal {
+    padding: 1.5rem;
   }
 }
 </style>

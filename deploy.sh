@@ -15,6 +15,9 @@ if [[ -z "$(git status --porcelain)" ]]; then
   exit 0
 fi
 
+echo "Running build checks..."
+npm run build
+
 git add -A
 git commit -m "$message"
 git push "$remote" "$branch"
