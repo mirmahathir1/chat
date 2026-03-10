@@ -572,6 +572,8 @@ export const useSignalingStore = defineStore('signaling', () => {
   }
 
   function handleJoinDisconnect(reason: string) {
+    clearRetryTimer()
+    retryCount.value = 0
     sessionStore.setConnectionState('disconnected')
     roomStore.syncLocalPeer()
     roomStore.updateRoomStatus('disconnected')
@@ -588,13 +590,12 @@ export const useSignalingStore = defineStore('signaling', () => {
       roomStore.updateMemberConnectionState(hostPeerId.value, 'disconnected')
     }
 
-    setState('error', reason)
+    setState('disconnected', reason)
     notificationStore.pushNotification({
       title: 'Host connection unavailable',
       detail: reason,
       tone: 'warning',
     })
-    scheduleRetry()
   }
 
   function scheduleRetry() {

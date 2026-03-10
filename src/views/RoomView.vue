@@ -110,10 +110,15 @@ const canRetryJoin = computed(
     !joinLinkIssue.value &&
     (signalingState.value === 'connecting' ||
       signalingState.value === 'retrying' ||
-      signalingState.value === 'disconnected' ||
       signalingState.value === 'error')
 )
 const showJoinBanner = computed(() => hasJoinQuery.value)
+const showHostDisconnectedModal = computed(
+  () => room.value?.localMode === 'join' && room.value.status === 'disconnected'
+)
+const hostDisconnectedDetail = computed(
+  () => errorMessage.value ?? 'The host is no longer connected to this room.'
+)
 const localPeerLabel = computed(
   () => sessionStore.peer?.label ?? 'Unassigned'
 )
@@ -163,6 +168,15 @@ watch(
     isRightDrawerOpen.value = false
   }
 )
+
+watch(showHostDisconnectedModal, (isVisible) => {
+  if (!isVisible) {
+    return
+  }
+
+  isLeftDrawerOpen.value = false
+  isRightDrawerOpen.value = false
+})
 
 function goBack() {
   signalingStore.destroyPeer()
@@ -379,6 +393,24 @@ async function sendFiles(upload: PreparedUpload) {
       </button>
       <NotificationPanel :notifications="notifications" />
     </aside>
+
+    <div
+      v-if="showHostDisconnectedModal"
+      class="room-view__modal-backdrop"
+      role="presentation"
+    >
+      <section
+        class="panel room-view__modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="host-disconnected-title"
+      >
+        <p class="eyebrow">Connection lost</p>
+        <h2 id="host-disconnected-title">Host Disconnected</h2>
+        <p>{{ hostDisconnectedDetail }}</p>
+        <button type="button" @click="goBack">Return to Home</button>
+      </section>
+    </div>
   </main>
 
   <main
@@ -480,6 +512,30 @@ async function sendFiles(upload: PreparedUpload) {
     var(--surface-strong);
   box-shadow: var(--shadow);
   transition: transform 220ms ease;
+}
+
+.room-view__modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  background: rgba(8, 5, 4, 0.82);
+  backdrop-filter: blur(10px);
+}
+
+.room-view__modal {
+  width: min(28rem, 100%);
+  text-align: center;
+}
+
+.room-view__modal h2 {
+  margin: 0.3rem 0 0.75rem;
+}
+
+.room-view__modal p:last-of-type {
+  margin-bottom: 1.25rem;
 }
 
 .room-view__drawer--left {

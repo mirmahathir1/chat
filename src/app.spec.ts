@@ -5,6 +5,7 @@ import App from '@/App.vue'
 import router from '@/router'
 import { useRoomStore } from '@/stores/room'
 import { useSessionStore } from '@/stores/session'
+import { useSignalingStore } from '@/stores/signaling'
 
 const signalingFns = vi.hoisted(() => ({
   ensureHost: vi.fn(),
@@ -158,6 +159,33 @@ describe('app flows', () => {
     await flushPromises()
     expect(app.text()).toContain('This device is connected to the host.')
     expect(app.text()).not.toContain('text chat lands')
+  })
+
+  it('shows a blocking host disconnected modal for joiners and returns home', async () => {
+    const app = await mountAt('/room/room-deadbeef?host=peer-feedcafe')
+    const roomStore = useRoomStore()
+    const signalingStore = useSignalingStore()
+
+    signalingStore.errorMessage = 'The host connection closed.'
+    signalingStore.state = 'disconnected'
+    roomStore.updateRoomStatus('disconnected')
+    await flushPromises()
+
+    expect(app.text()).toContain('Host Disconnected')
+    expect(app.text()).toContain('Return to Home')
+    expect(app.text()).not.toContain('Retry connection')
+
+    const returnHomeButton = app
+      .findAll('button')
+      .find((button) => button.text() === 'Return to Home')
+
+    expect(returnHomeButton).toBeTruthy()
+
+    await returnHomeButton!.trigger('click')
+    await flushPromises()
+
+    expect(signalingFns.destroyPeer).toHaveBeenCalled()
+    expect(router.currentRoute.value.name).toBe('home')
   })
 
   it('joins a room by typing a human-readable room code from the lobby', async () => {
