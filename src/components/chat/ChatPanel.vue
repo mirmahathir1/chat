@@ -153,8 +153,10 @@ watch(
       return
     }
 
-    const previousTail = previousItems.at(-1)
-    const nextTail = nextItems.at(-1)
+    const previousTail =
+      previousItems.length > 0 ? previousItems[previousItems.length - 1] : undefined
+    const nextTail =
+      nextItems.length > 0 ? nextItems[nextItems.length - 1] : undefined
     const isNewTail = nextTail?.item.id !== previousTail?.item.id
 
     if (previousItems.length === 0) {
