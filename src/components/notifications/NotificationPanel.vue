@@ -17,25 +17,29 @@ defineProps<{
       <span class="phase-chip">In-app feed</span>
     </div>
 
-    <ul v-if="notifications.length" class="notification-list">
-      <li
-        v-for="notification in notifications"
-        :key="notification.id"
-        :class="[
-          'notification-list__item',
-          `notification-list__item--${notification.tone}`,
-        ]"
-      >
-        <div class="notification-list__meta">
-          <strong>{{ notification.title }}</strong>
-          <span>{{ formatTimeLabel(notification.createdAt) }}</span>
-        </div>
-        <p>{{ notification.detail }}</p>
-      </li>
-    </ul>
-    <p v-else class="notification-panel__empty">
-      Host presence changes and room notices will appear here.
-    </p>
+    <Transition name="ui-fade" mode="out-in" appear>
+      <ul v-if="notifications.length" class="notification-list">
+        <TransitionGroup name="ui-list" appear>
+          <li
+            v-for="notification in notifications"
+            :key="notification.id"
+            :class="[
+              'notification-list__item',
+              `notification-list__item--${notification.tone}`,
+            ]"
+          >
+            <div class="notification-list__meta">
+              <strong>{{ notification.title }}</strong>
+              <span>{{ formatTimeLabel(notification.createdAt) }}</span>
+            </div>
+            <p>{{ notification.detail }}</p>
+          </li>
+        </TransitionGroup>
+      </ul>
+      <p v-else class="notification-panel__empty">
+        Host presence changes and room notices will appear here.
+      </p>
+    </Transition>
   </section>
 </template>
 

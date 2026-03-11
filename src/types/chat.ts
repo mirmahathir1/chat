@@ -19,7 +19,12 @@ export type MessageKind = 'text' | 'system'
 export type MessageDeliveryState = 'local' | 'pending' | 'sent' | 'failed'
 export type PresenceEventType = 'host-created' | 'joined' | 'left'
 export type TransferDirection = 'incoming' | 'outgoing'
-export type TransferStatus = 'queued' | 'transferring' | 'completed' | 'failed'
+export type TransferStatus =
+  | 'queued'
+  | 'transferring'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
 export type NotificationTone = 'info' | 'success' | 'warning'
 
 export interface PeerIdentity {
@@ -66,6 +71,8 @@ export interface TransferFile {
 
 export interface FileTransfer {
   id: string
+  senderId: string
+  senderLabel: string
   peerId: string
   peerLabel?: string
   direction: TransferDirection

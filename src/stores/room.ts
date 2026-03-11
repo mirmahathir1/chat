@@ -1,13 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import {
-  createTransferFiles,
-  validateTransferFiles,
-} from '@/lib/fileTransfer'
-import {
-  createHumanReadableId,
-  formatHumanReadableId,
-} from '@/lib/humanId'
+import { createTransferFiles, validateTransferFiles } from '@/lib/fileTransfer'
+import { createHumanReadableId, formatHumanReadableId } from '@/lib/humanId'
 import { createId } from '@/lib/id'
 import { buildShareUrl } from '@/lib/roomLink'
 import type {
@@ -73,8 +67,7 @@ function buildInitialNotifications(
     {
       id: createId('notification'),
       title: 'Share link is ready',
-      detail:
-        `${host.label} is the current host for room ${room.id}.`,
+      detail: `${host.label} is the current host for room ${room.id}.`,
       tone: 'info',
       createdAt: room.createdAt,
       seen: false,
@@ -361,7 +354,9 @@ export const useRoomStore = defineStore('room', () => {
     }
 
     transfers.value = transfers.value.map((currentTransfer, index) =>
-      index === existingIndex ? { ...currentTransfer, ...transfer } : currentTransfer
+      index === existingIndex
+        ? { ...currentTransfer, ...transfer }
+        : currentTransfer
     )
   }
 
@@ -384,13 +379,15 @@ export const useRoomStore = defineStore('room', () => {
 
     const localPeer =
       sessionStore.peer ??
-      sessionStore.ensureSession(room.value?.localMode === 'host' ? 'host' : 'member')
+      sessionStore.ensureSession(
+        room.value?.localMode === 'host' ? 'host' : 'member'
+      )
     const transfer: FileTransfer = {
       id: createId('transfer'),
+      senderId: localPeer.id,
+      senderLabel: localPeer.label,
       peerId:
-        room.value?.localMode === 'join'
-          ? room.value.hostPeerId
-          : localPeer.id,
+        room.value?.localMode === 'join' ? room.value.hostPeerId : localPeer.id,
       peerLabel: 'Room members',
       direction: 'outgoing',
       status: 'queued',
@@ -414,16 +411,24 @@ export const useRoomStore = defineStore('room', () => {
     senderId: string,
     senderLabel: string,
     files: TransferFile[],
-    totalBytes: number
+    totalBytes: number,
+    createdAt?: string
   ) {
+    const existingTransfer = transfers.value.find(
+      (currentTransfer) => currentTransfer.id === transferId
+    )
+
     upsertTransfer({
       id: transferId,
+      senderId,
+      senderLabel,
       peerId: senderId,
       peerLabel: senderLabel,
       direction: 'incoming',
       status: 'queued',
       progress: 0,
-      createdAt: new Date().toISOString(),
+      createdAt:
+        existingTransfer?.createdAt ?? createdAt ?? new Date().toISOString(),
       totalBytes,
       files,
     })
@@ -450,10 +455,7 @@ export const useRoomStore = defineStore('room', () => {
     })
   }
 
-  function completeTransfer(
-    transferId: string,
-    files?: TransferFile[]
-  ) {
+  function completeTransfer(transferId: string, files?: TransferFile[]) {
     const transfer = transfers.value.find(
       (currentTransfer) => currentTransfer.id === transferId
     )
@@ -487,6 +489,23 @@ export const useRoomStore = defineStore('room', () => {
     })
   }
 
+  function cancelTransfer(transferId: string) {
+    const transfer = transfers.value.find(
+      (currentTransfer) => currentTransfer.id === transferId
+    )
+
+    if (!transfer) {
+      return
+    }
+
+    upsertTransfer({
+      ...transfer,
+      status: 'cancelled',
+      progress: 0,
+      error: undefined,
+    })
+  }
+
   function failTransfersForPeer(peerId: string, error: string) {
     transfers.value = transfers.value.map((transfer) => {
       if (transfer.peerId !== peerId || transfer.status === 'completed') {
@@ -503,6 +522,11 @@ export const useRoomStore = defineStore('room', () => {
 
   function resetTransfers() {
     transfers.value = []
+  }
+
+  function replaceTransfers(nextTransfers: FileTransfer[]) {
+    transfers.value = nextTransfers
+    persistRoomState()
   }
 
   function upsertMember(member: PeerIdentity) {
@@ -537,7 +561,9 @@ export const useRoomStore = defineStore('room', () => {
     peerId: string,
     connectionState: PeerIdentity['connectionState']
   ) {
-    const member = members.value.find((currentMember) => currentMember.id === peerId)
+    const member = members.value.find(
+      (currentMember) => currentMember.id === peerId
+    )
 
     if (!member) {
       return
@@ -560,7 +586,9 @@ export const useRoomStore = defineStore('room', () => {
   function createDraftMessage(): DraftMessageResult {
     const localPeer =
       sessionStore.peer ??
-      sessionStore.ensureSession(room.value?.localMode === 'host' ? 'host' : 'member')
+      sessionStore.ensureSession(
+        room.value?.localMode === 'host' ? 'host' : 'member'
+      )
 
     if (!room.value) {
       return {
@@ -614,7 +642,9 @@ export const useRoomStore = defineStore('room', () => {
     }
 
     messages.value = messages.value.map((currentMessage, index) =>
-      index === existingIndex ? { ...currentMessage, ...message } : currentMessage
+      index === existingIndex
+        ? { ...currentMessage, ...message }
+        : currentMessage
     )
     persistRoomState()
   }
@@ -624,7 +654,9 @@ export const useRoomStore = defineStore('room', () => {
     status: ChatMessage['status'],
     fallbackMessage?: ChatMessage
   ) {
-    const existingMessage = messages.value.find((message) => message.id === messageId)
+    const existingMessage = messages.value.find(
+      (message) => message.id === messageId
+    )
 
     if (!existingMessage && fallbackMessage) {
       upsertMessage({
@@ -699,8 +731,10 @@ export const useRoomStore = defineStore('room', () => {
     updateTransferProgress,
     completeTransfer,
     failTransfer,
+    cancelTransfer,
     failTransfersForPeer,
     resetTransfers,
+    replaceTransfers,
     upsertMember,
     replaceMembers,
     removeMember,

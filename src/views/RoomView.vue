@@ -26,13 +26,16 @@ const {
   messages,
   transfers,
   draftMessage,
-  presenceEvents,
   isJoinView,
   connectedMemberCount,
 } = storeToRefs(roomStore)
 const { items: notifications } = storeToRefs(notificationStore)
-const { state: signalingState, errorMessage, retryCount } =
-  storeToRefs(signalingStore)
+const {
+  state: signalingState,
+  errorMessage,
+  retryCount,
+  isHistoryLoading,
+} = storeToRefs(signalingStore)
 const roomIdParam = computed(() =>
   typeof route.params.roomId === 'string' ? route.params.roomId : null
 )
@@ -61,7 +64,8 @@ const isChatDisabled = computed(
   () => isJoinView.value && signalingState.value !== 'connected'
 )
 const isFileShareDisabled = computed(
-  () => isChatDisabled.value || connectedMemberCount.value < 2
+  () =>
+    isChatDisabled.value || (isJoinView.value && connectedMemberCount.value < 2)
 )
 const joinStateTitle = computed(() => {
   switch (signalingState.value) {
@@ -72,7 +76,7 @@ const joinStateTitle = computed(() => {
     case 'retrying':
       return 'Trying the host again.'
     case 'connected':
-      return 'This device is connected to the host.'
+      return ''
     case 'disconnected':
       return 'This device is disconnected from the host.'
     case 'error':
@@ -98,7 +102,7 @@ const joinStateDetail = computed(() => {
     case 'retrying':
       return 'The host did not answer yet. Automatic reconnect is still in progress.'
     case 'connected':
-      return 'Chat and presence are now synchronized through the host-managed room.'
+      return ''
     case 'disconnected':
       return 'The host channel is down. Retry manually or verify that the host is still online.'
     default:
@@ -108,37 +112,24 @@ const joinStateDetail = computed(() => {
 const canRetryJoin = computed(
   () =>
     !joinLinkIssue.value &&
+    !(
+      room.value?.localMode === 'join' && room.value.status === 'disconnected'
+    ) &&
     (signalingState.value === 'connecting' ||
       signalingState.value === 'retrying' ||
       signalingState.value === 'disconnected' ||
       signalingState.value === 'error')
 )
-const showJoinBanner = computed(() => hasJoinQuery.value)
+const showJoinBanner = computed(
+  () => hasJoinQuery.value && signalingState.value !== 'connected'
+)
 const showHostDisconnectedModal = computed(
-  () =>
-    room.value?.localMode === 'join' && room.value.status === 'disconnected'
+  () => room.value?.localMode === 'join' && room.value.status === 'disconnected'
 )
 const hostDisconnectedDetail = computed(
   () => errorMessage.value ?? 'The host is no longer connected to this room.'
 )
-const localPeerLabel = computed(
-  () => sessionStore.peer?.label ?? 'Unassigned'
-)
-const roomSubtitle = computed(() => {
-  if (!room.value) {
-    return ''
-  }
-
-  return room.value.localMode === 'host'
-    ? `Host ${sessionStore.peer?.label ?? 'unassigned'} is listening on ${room.value.hostPeerId}.`
-    : `Join flow prepared for host ${room.value.hostPeerId}.`
-})
-const roomStatusPills = computed(() => [
-  `Status ${room.value?.status ?? 'idle'}`,
-  `Active members ${connectedMemberCount.value}`,
-  `Signaling ${signalingState.value}`,
-  `Presence events ${presenceEvents.value.length}`,
-])
+const localPeerLabel = computed(() => sessionStore.peer?.label ?? 'Unassigned')
 
 watch(
   [roomIdParam, joinLinkIssue, joinHostPeerId],
@@ -216,6 +207,14 @@ function sendDraftMessage() {
   signalingStore.sendDraftMessage()
 }
 
+function cancelTransfer(transferId: string) {
+  signalingStore.cancelTransfer(transferId)
+}
+
+function downloadTransfer(transferId: string) {
+  signalingStore.requestTransferReplay(transferId)
+}
+
 async function sendFiles(upload: PreparedUpload) {
   try {
     await signalingStore.sendFiles(upload.files)
@@ -226,98 +225,22 @@ async function sendFiles(upload: PreparedUpload) {
 </script>
 
 <template>
-  <main v-if="room && !joinLinkIssue" class="page-shell room-view">
-    <div class="room-view__toolbar">
-      <button
-        type="button"
-        class="room-view__icon-button room-view__icon-button--left"
-        aria-label="Open room drawer"
-        @click="openLeftDrawer"
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path
-            d="M4 7h16M4 12h16M4 17h16"
-            fill="none"
-            stroke="currentColor"
-            stroke-linecap="round"
-            stroke-width="2"
-          />
-        </svg>
-      </button>
-
-      <div class="room-view__toolbar-copy">
-        <p class="room-view__identity">Hi {{ localPeerLabel }} !</p>
-      </div>
-
-      <button
-        type="button"
-        class="room-view__icon-button room-view__icon-button--right"
-        aria-label="Open notifications drawer"
-        @click="openRightDrawer"
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path
-            d="M12 4a4 4 0 0 0-4 4v2.3c0 .7-.2 1.38-.58 1.97L6 14.5h12l-1.42-2.23A3.7 3.7 0 0 1 16 10.3V8a4 4 0 0 0-4-4Z"
-            fill="none"
-            stroke="currentColor"
-            stroke-linejoin="round"
-            stroke-width="1.8"
-          />
-          <path
-            d="M10 18a2 2 0 0 0 4 0"
-            fill="none"
-            stroke="currentColor"
-            stroke-linecap="round"
-            stroke-width="1.8"
-          />
-        </svg>
-      </button>
-    </div>
-
-    <ChatPanel
-      :messages="messages"
-      :transfers="transfers"
-      :draft="draftMessage"
-      :local-peer-id="sessionStore.peer?.id"
-      :disabled="isChatDisabled"
-      :file-disabled="isFileShareDisabled"
-      @update:draft="roomStore.updateDraftMessage"
-      @send="sendDraftMessage"
-      @send-files="sendFiles"
-    />
-
-    <div
-      v-if="isLeftDrawerOpen"
-      class="room-view__drawer-backdrop"
-      @click="closeLeftDrawer"
-    />
-    <aside
-      :class="[
-        'room-view__drawer',
-        'room-view__drawer--left',
-        { 'room-view__drawer--open': isLeftDrawerOpen },
-      ]"
+  <Transition name="ui-fade" mode="out-in" appear>
+    <main
+      v-if="room && !joinLinkIssue"
+      key="active-room"
+      class="page-shell room-view"
     >
-      <div class="room-view__drawer-header">
-        <div>
-          <p class="eyebrow">Room</p>
-          <h2>{{ room.name }}</h2>
-          <p class="room-view__drawer-subtitle">
-            {{ roomSubtitle }}
-          </p>
-          <p v-if="errorMessage" class="room-view__drawer-error">
-            {{ errorMessage }}
-          </p>
-        </div>
+      <div class="room-view__toolbar">
         <button
           type="button"
-          class="room-view__drawer-close"
-          aria-label="Close room drawer"
-          @click="closeLeftDrawer"
+          class="room-view__icon-button room-view__icon-button--left"
+          aria-label="Open room drawer"
+          @click="openLeftDrawer"
         >
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path
-              d="m6 6 12 12M18 6 6 18"
+              d="M4 7h16M4 12h16M4 17h16"
               fill="none"
               stroke="currentColor"
               stroke-linecap="round"
@@ -325,120 +248,231 @@ async function sendFiles(upload: PreparedUpload) {
             />
           </svg>
         </button>
-      </div>
 
-      <div class="room-view__drawer-status">
-        <span
-          v-for="status in roomStatusPills"
-          :key="status"
-          class="room-view__status-pill"
-        >
-          {{ status }}
-        </span>
-      </div>
+        <div class="room-view__toolbar-copy">
+          <p class="room-view__identity">Hi {{ localPeerLabel }} !</p>
+        </div>
 
-      <div class="room-view__drawer-actions">
-        <button type="button" class="secondary-button" @click="goBack">
-          Back to lobby
-        </button>
-      </div>
-
-      <section v-if="showJoinBanner" class="panel room-view__join-banner">
-        <p class="eyebrow">Join flow</p>
-        <h2>{{ joinStateTitle }}</h2>
-        <p>{{ joinStateDetail }}</p>
-        <div class="room-view__join-actions">
-          <button v-if="canRetryJoin" type="button" @click="retryConnection">
-            Retry connection
+        <div class="room-view__toolbar-actions">
+          <button
+            type="button"
+            class="room-view__icon-button room-view__icon-button--right"
+            aria-label="Open notifications drawer"
+            @click="openRightDrawer"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M12 4a4 4 0 0 0-4 4v2.3c0 .7-.2 1.38-.58 1.97L6 14.5h12l-1.42-2.23A3.7 3.7 0 0 1 16 10.3V8a4 4 0 0 0-4-4Z"
+                fill="none"
+                stroke="currentColor"
+                stroke-linejoin="round"
+                stroke-width="1.8"
+              />
+              <path
+                d="M10 18a2 2 0 0 0 4 0"
+                fill="none"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-width="1.8"
+              />
+            </svg>
           </button>
-          <span v-if="retryCount > 0" class="room-view__join-meta">
-            Retry attempts {{ retryCount }}
-          </span>
         </div>
-      </section>
+      </div>
 
-      <SharePanel :room="room" />
-      <MembersPanel
-        :members="members"
-        :host-peer-id="room.hostPeerId"
-        :active-member-count="connectedMemberCount"
+      <ChatPanel
+        :messages="messages"
+        :transfers="transfers"
+        :draft="draftMessage"
+        :local-peer-id="sessionStore.peer?.id"
+        :history-loading="isHistoryLoading"
+        :disabled="isChatDisabled"
+        :file-disabled="isFileShareDisabled"
+        @update:draft="roomStore.updateDraftMessage"
+        @send="sendDraftMessage"
+        @cancel-transfer="cancelTransfer"
+        @download-transfer="downloadTransfer"
+        @send-files="sendFiles"
       />
-    </aside>
 
-    <div
-      v-if="isRightDrawerOpen"
-      class="room-view__drawer-backdrop"
-      @click="closeRightDrawer"
-    />
-    <aside
-      :class="[
-        'room-view__drawer',
-        'room-view__drawer--right',
-        { 'room-view__drawer--open': isRightDrawerOpen },
-      ]"
-    >
-      <button
-        type="button"
-        class="room-view__drawer-close room-view__drawer-close--floating"
-        aria-label="Close notifications drawer"
-        @click="closeRightDrawer"
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path
-            d="m6 6 12 12M18 6 6 18"
-            fill="none"
-            stroke="currentColor"
-            stroke-linecap="round"
-            stroke-width="2"
+      <Transition name="ui-fade" appear>
+        <div
+          v-if="isLeftDrawerOpen"
+          class="room-view__drawer-backdrop"
+          @click="closeLeftDrawer"
+        />
+      </Transition>
+      <Transition name="ui-slide-left" appear>
+        <aside
+          v-if="isLeftDrawerOpen"
+          class="room-view__drawer room-view__drawer--left"
+        >
+          <div class="room-view__drawer-header">
+            <div>
+              <p class="eyebrow">Room</p>
+              <h2>{{ room.name }}</h2>
+              <Transition name="ui-fade" appear>
+                <p v-if="errorMessage" class="room-view__drawer-error">
+                  {{ errorMessage }}
+                </p>
+              </Transition>
+            </div>
+            <button
+              type="button"
+              class="room-view__drawer-close"
+              aria-label="Close room drawer"
+              @click="closeLeftDrawer"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  d="m6 6 12 12M18 6 6 18"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-width="2"
+                />
+              </svg>
+            </button>
+          </div>
+
+          <div class="room-view__drawer-actions">
+            <button
+              type="button"
+              class="room-view__drawer-action-button"
+              aria-label="Exit room"
+              @click="goBack"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  d="M10 17l-5-5 5-5M5 12h10"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                />
+                <path
+                  d="M14 5h3a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-3"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                />
+              </svg>
+              <span>Disconnect and Exit Room</span>
+            </button>
+          </div>
+
+          <Transition name="ui-fade" appear>
+            <section v-if="showJoinBanner" class="panel room-view__join-banner">
+              <h2>{{ joinStateTitle }}</h2>
+              <p>{{ joinStateDetail }}</p>
+              <div class="room-view__join-actions">
+                <Transition name="ui-fade" appear>
+                  <button
+                    v-if="canRetryJoin"
+                    type="button"
+                    @click="retryConnection"
+                  >
+                    Retry connection
+                  </button>
+                </Transition>
+                <Transition name="ui-fade" appear>
+                  <span v-if="retryCount > 0" class="room-view__join-meta">
+                    Retry attempts {{ retryCount }}
+                  </span>
+                </Transition>
+              </div>
+            </section>
+          </Transition>
+
+          <SharePanel :room="room" />
+          <MembersPanel
+            :members="members"
+            :host-peer-id="room.hostPeerId"
+            :active-member-count="connectedMemberCount"
           />
-        </svg>
-      </button>
-      <NotificationPanel :notifications="notifications" />
-    </aside>
+        </aside>
+      </Transition>
 
-    <div
-      v-if="showHostDisconnectedModal"
-      class="room-view__modal-backdrop"
-      role="presentation"
-    >
-      <section
-        class="panel room-view__modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="host-disconnected-title"
-      >
-        <p class="eyebrow">Connection lost</p>
-        <h2 id="host-disconnected-title">Host Disconnected</h2>
-        <p>{{ hostDisconnectedDetail }}</p>
-        <div class="room-view__join-actions">
-          <button type="button" @click="goBack">Return to Home</button>
+      <Transition name="ui-fade" appear>
+        <div
+          v-if="isRightDrawerOpen"
+          class="room-view__drawer-backdrop"
+          @click="closeRightDrawer"
+        />
+      </Transition>
+      <Transition name="ui-slide-right" appear>
+        <aside
+          v-if="isRightDrawerOpen"
+          class="room-view__drawer room-view__drawer--right"
+        >
+          <button
+            type="button"
+            class="room-view__drawer-close room-view__drawer-close--floating"
+            aria-label="Close notifications drawer"
+            @click="closeRightDrawer"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="m6 6 12 12M18 6 6 18"
+                fill="none"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-width="2"
+              />
+            </svg>
+          </button>
+          <NotificationPanel :notifications="notifications" />
+        </aside>
+      </Transition>
+
+      <Transition name="ui-overlay" appear>
+        <div
+          v-if="showHostDisconnectedModal"
+          class="room-view__modal-backdrop"
+          role="presentation"
+        >
+          <section
+            class="panel room-view__modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="host-disconnected-title"
+          >
+            <p class="eyebrow">Connection lost</p>
+            <h2 id="host-disconnected-title">Host Disconnected</h2>
+            <p>{{ hostDisconnectedDetail }}</p>
+            <div class="room-view__join-actions">
+              <button type="button" @click="goBack">Return to Home</button>
+            </div>
+          </section>
         </div>
+      </Transition>
+    </main>
+
+    <main
+      v-else-if="joinLinkIssue"
+      key="invalid-invite"
+      class="page-shell room-view room-view--empty"
+    >
+      <section class="panel room-view__empty-state">
+        <p class="eyebrow">Invalid invite</p>
+        <h1>That room link cannot be opened.</h1>
+        <p>{{ joinLinkIssue }}</p>
+        <button type="button" @click="goBack">Back to lobby</button>
       </section>
-    </div>
-  </main>
+    </main>
 
-  <main
-    v-else-if="joinLinkIssue"
-    class="page-shell room-view room-view--empty"
-  >
-    <section class="panel room-view__empty-state">
-      <p class="eyebrow">Invalid invite</p>
-      <h1>That room link cannot be opened.</h1>
-      <p>{{ joinLinkIssue }}</p>
-      <button type="button" @click="goBack">Back to lobby</button>
-    </section>
-  </main>
-
-  <main v-else class="page-shell room-view room-view--empty">
-    <section class="panel room-view__empty-state">
-      <p class="eyebrow">Room shell</p>
-      <h1>No room is active yet.</h1>
-      <p>
-        Return to the lobby to create a new hosted room.
-      </p>
-      <button type="button" @click="goBack">Back to lobby</button>
-    </section>
-  </main>
+    <main v-else key="empty-room" class="page-shell room-view room-view--empty">
+      <section class="panel room-view__empty-state">
+        <p class="eyebrow">Room shell</p>
+        <h1>No room is active yet.</h1>
+        <p>Return to the lobby to create a new hosted room.</p>
+        <button type="button" @click="goBack">Back to lobby</button>
+      </section>
+    </main>
+  </Transition>
 </template>
 
 <style scoped>
@@ -459,6 +493,13 @@ async function sendFiles(upload: PreparedUpload) {
   grid-template-columns: auto 1fr auto;
   align-items: center;
   gap: 1rem;
+}
+
+.room-view__toolbar-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.75rem;
 }
 
 .room-view__toolbar-copy {
@@ -515,7 +556,6 @@ async function sendFiles(upload: PreparedUpload) {
     linear-gradient(180deg, rgba(28, 20, 18, 0.98), rgba(18, 13, 11, 0.96)),
     var(--surface-strong);
   box-shadow: var(--shadow);
-  transition: transform 220ms ease;
 }
 
 .room-view__modal-backdrop {
@@ -547,20 +587,27 @@ async function sendFiles(upload: PreparedUpload) {
   justify-content: center;
 }
 
+.ui-overlay-enter-active .room-view__modal,
+.ui-overlay-leave-active .room-view__modal {
+  transition:
+    opacity 220ms var(--motion-soft),
+    transform 280ms var(--motion-spring);
+}
+
+.ui-overlay-enter-from .room-view__modal,
+.ui-overlay-leave-to .room-view__modal {
+  opacity: 0;
+  transform: translateY(1rem) scale(0.96);
+}
+
 .room-view__drawer--left {
   left: 0;
-  transform: translateX(-100%);
   border-right: 1px solid var(--border);
 }
 
 .room-view__drawer--right {
   right: 0;
-  transform: translateX(100%);
   border-left: 1px solid var(--border);
-}
-
-.room-view__drawer--open {
-  transform: translateX(0);
 }
 
 .room-view__drawer-header {
@@ -594,34 +641,30 @@ async function sendFiles(upload: PreparedUpload) {
   margin-left: auto;
 }
 
-.room-view__drawer-subtitle,
 .room-view__drawer-error {
   margin: 0.65rem 0 0;
-  color: var(--text-muted);
 }
 
 .room-view__drawer-error {
   color: var(--accent);
 }
 
-.room-view__drawer-status {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.7rem;
-  margin-top: 1rem;
-}
-
-.room-view__status-pill {
-  border: 1px solid var(--border-strong);
-  border-radius: 999px;
-  padding: 0.55rem 0.85rem;
-  background: rgba(255, 255, 255, 0.04);
-  font-size: 0.88rem;
-}
-
 .room-view__drawer-actions {
   display: flex;
   margin-top: 1rem;
+}
+
+.room-view__drawer-action-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  justify-content: flex-start;
+}
+
+.room-view__drawer-action-button svg {
+  width: 1.25rem;
+  height: 1.25rem;
 }
 
 .room-view__drawer :deep(.panel) {

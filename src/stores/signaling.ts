@@ -1,12 +1,18 @@
-import Peer, {
-  PeerErrorType,
-  type DataConnection,
-} from 'peerjs'
+import Peer, { PeerErrorType, type DataConnection } from 'peerjs'
 import { defineStore } from 'pinia'
 import { computed, markRaw, ref, shallowRef } from 'vue'
 import { readFileInChunks } from '@/lib/fileTransfer'
 import { mergeSyncedMessages } from '@/lib/messageSync'
 import { getPeerOptions } from '@/lib/peerConfig'
+import {
+  buildReplayTransferFiles,
+  hasReplayableFileSet,
+  listTransfersToReplay,
+} from '@/lib/transferReplay'
+import {
+  buildTransferHistorySnapshot,
+  mergeSyncedTransfers,
+} from '@/lib/transferSync'
 import {
   abortTransferStore,
   closeTransferStore,
@@ -15,6 +21,7 @@ import {
   writeTransferStoreChunk,
 } from '@/lib/transferStorage'
 import { useNotificationStore } from '@/stores/notifications'
+import { useNetworkActivityStore } from '@/stores/networkActivity'
 import { maxChatMessageBytes, useRoomStore } from '@/stores/room'
 import { useSessionStore } from '@/stores/session'
 import type {
@@ -41,6 +48,7 @@ interface HostWelcomeMessage {
   members: PeerIdentity[]
   presenceEvents: PresenceEvent[]
   messages: ChatMessage[]
+  transfers?: FileTransfer[]
 }
 
 interface RoomSyncMessage {
@@ -82,6 +90,8 @@ interface FileOfferMessage {
   sender: Pick<PeerIdentity, 'id' | 'label'>
   files: TransferFile[]
   totalBytes: number
+  createdAt?: string
+  targetPeerId?: string
 }
 
 interface FileChunkMessage {
@@ -92,12 +102,36 @@ interface FileChunkMessage {
   chunkIndex: number
   totalChunks: number
   data: ArrayBuffer
+  targetPeerId?: string
 }
 
 interface FileCompleteMessage {
   type: 'file-complete'
   roomId: string
   transferId: string
+  targetPeerId?: string
+}
+
+interface ReplayTransferRequestMessage {
+  type: 'replay-transfer'
+  roomId: string
+  transferId: string
+  recipientPeerId: string
+}
+
+interface ReplayTransferUnavailableMessage {
+  type: 'replay-transfer-unavailable'
+  roomId: string
+  transferId: string
+  recipientPeerId: string
+  reason: string
+}
+
+interface TransferCancelMessage {
+  type: 'transfer-cancel'
+  roomId: string
+  transferId: string
+  targetPeerId?: string
 }
 
 type SignalingMessage =
@@ -111,8 +145,12 @@ type SignalingMessage =
   | FileOfferMessage
   | FileChunkMessage
   | FileCompleteMessage
+  | ReplayTransferRequestMessage
+  | ReplayTransferUnavailableMessage
+  | TransferCancelMessage
 
 const maxRetryAttempts = 3
+type OutgoingTransferMode = 'live' | 'replay'
 
 interface IncomingFileBuffer {
   meta: TransferFile
@@ -133,6 +171,22 @@ interface IncomingTransferBuffer {
   failed: boolean
 }
 
+class TransferCancelledError extends Error {
+  transferId: string
+
+  constructor(transferId: string) {
+    super('The recipient cancelled the transfer.')
+    this.name = 'TransferCancelledError'
+    this.transferId = transferId
+  }
+}
+
+function isTransferCancelledError(
+  error: unknown
+): error is TransferCancelledError {
+  return error instanceof TransferCancelledError
+}
+
 export const useSignalingStore = defineStore('signaling', () => {
   const peer = shallowRef<Peer | null>(null)
   const hostConnection = shallowRef<DataConnection | null>(null)
@@ -144,10 +198,14 @@ export const useSignalingStore = defineStore('signaling', () => {
   const errorMessage = ref<string | null>(null)
   const retryCount = ref(0)
   const lastPresenceNotificationKey = ref<string | null>(null)
+  const isHistoryLoading = ref(false)
+  const pendingHistoryTransferIds = ref<string[]>([])
+  const hasReceivedHistorySnapshot = ref(false)
 
   const sessionStore = useSessionStore()
   const roomStore = useRoomStore()
   const notificationStore = useNotificationStore()
+  const networkActivityStore = useNetworkActivityStore()
 
   const isReady = computed(
     () => state.value === 'listening' || state.value === 'connected'
@@ -156,6 +214,15 @@ export const useSignalingStore = defineStore('signaling', () => {
   let retryTimer: ReturnType<typeof setTimeout> | null = null
   let listenersBound = false
   const incomingTransfers = new Map<string, IncomingTransferBuffer>()
+  const cancelledIncomingTransfers = new Set<string>()
+  const outgoingTransferFiles = new Map<string, File[]>()
+  const outgoingTransferModes = new Map<string, OutgoingTransferMode>()
+  const outgoingTransferTargets = new Map<string, string | null>()
+  const cancelledOutgoingTransfers = new Set<string>()
+  const incomingTransferActivityTokens = new Map<string, number>()
+  let outgoingReplayChain = Promise.resolve()
+  let peerBootstrapActivityToken: number | null = null
+  let joinConnectionActivityToken: number | null = null
 
   function setState(nextState: SignalingState, nextError?: string | null) {
     state.value = nextState
@@ -181,6 +248,125 @@ export const useSignalingStore = defineStore('signaling', () => {
     retryTimer = null
   }
 
+  function startPeerBootstrapActivity() {
+    if (peerBootstrapActivityToken !== null) {
+      return
+    }
+
+    peerBootstrapActivityToken = networkActivityStore.start()
+  }
+
+  function finishPeerBootstrapActivity() {
+    if (peerBootstrapActivityToken === null) {
+      return
+    }
+
+    networkActivityStore.finish(peerBootstrapActivityToken)
+    peerBootstrapActivityToken = null
+  }
+
+  function startJoinConnectionActivity() {
+    if (joinConnectionActivityToken !== null) {
+      return
+    }
+
+    joinConnectionActivityToken = networkActivityStore.start()
+  }
+
+  function finishJoinConnectionActivity() {
+    if (joinConnectionActivityToken === null) {
+      return
+    }
+
+    networkActivityStore.finish(joinConnectionActivityToken)
+    joinConnectionActivityToken = null
+  }
+
+  function pulseNetworkActivity() {
+    networkActivityStore.pulse()
+  }
+
+  function hasOpenMemberConnections() {
+    return Object.values(memberConnections.value).some(
+      (connection) => connection.open
+    )
+  }
+
+  function startIncomingTransferActivity(transferId: string) {
+    if (incomingTransferActivityTokens.has(transferId)) {
+      return
+    }
+
+    incomingTransferActivityTokens.set(transferId, networkActivityStore.start())
+  }
+
+  function finishIncomingTransferActivity(transferId: string) {
+    const token = incomingTransferActivityTokens.get(transferId)
+
+    if (token === undefined) {
+      return
+    }
+
+    incomingTransferActivityTokens.delete(transferId)
+    networkActivityStore.finish(token)
+  }
+
+  function finishAllIncomingTransferActivity() {
+    for (const transferId of incomingTransferActivityTokens.keys()) {
+      finishIncomingTransferActivity(transferId)
+    }
+  }
+
+  function startOutgoingTransfer(
+    transferId: string,
+    mode: OutgoingTransferMode,
+    targetPeerId: string | null = null
+  ) {
+    outgoingTransferModes.set(transferId, mode)
+    outgoingTransferTargets.set(transferId, targetPeerId)
+  }
+
+  function finishOutgoingTransfer(transferId: string) {
+    outgoingTransferModes.delete(transferId)
+    outgoingTransferTargets.delete(transferId)
+    cancelledOutgoingTransfers.delete(transferId)
+  }
+
+  function syncCancelledOutgoingTransfer(
+    transferId: string,
+    mode: OutgoingTransferMode
+  ) {
+    if (mode === 'replay') {
+      roomStore.completeTransfer(transferId)
+
+      return
+    }
+
+    roomStore.cancelTransfer(transferId)
+  }
+
+  function throwIfOutgoingTransferCancelled(transferId: string) {
+    if (cancelledOutgoingTransfers.has(transferId)) {
+      throw new TransferCancelledError(transferId)
+    }
+  }
+
+  function handleOutgoingTransferCancelled(message: TransferCancelMessage) {
+    cancelledOutgoingTransfers.add(message.transferId)
+
+    const mode = outgoingTransferModes.get(message.transferId)
+
+    if (!mode) {
+      return
+    }
+
+    syncCancelledOutgoingTransfer(message.transferId, mode)
+
+    if (message.targetPeerId) {
+      notifyRecipientsTransferCancelled(message.transferId)
+    }
+  }
+
   async function disposeIncomingTransfer(transfer: IncomingTransferBuffer) {
     await Promise.all(
       Array.from(transfer.files.values(), async (fileBuffer) => {
@@ -202,7 +388,9 @@ export const useSignalingStore = defineStore('signaling', () => {
         continue
       }
 
+      transfer.failed = true
       incomingTransfers.delete(transferId)
+      finishIncomingTransferActivity(transferId)
       void disposeIncomingTransfer(transfer)
     }
   }
@@ -211,8 +399,10 @@ export const useSignalingStore = defineStore('signaling', () => {
     const transfers = Array.from(incomingTransfers.values())
 
     incomingTransfers.clear()
+    finishAllIncomingTransferActivity()
 
     for (const transfer of transfers) {
+      transfer.failed = true
       void disposeIncomingTransfer(transfer)
     }
   }
@@ -227,14 +417,73 @@ export const useSignalingStore = defineStore('signaling', () => {
 
     memberConnections.value = {}
     disposeAllIncomingTransfers()
+    cancelledIncomingTransfers.clear()
     clearRetryTimer()
+    resetHistoryLoading()
+  }
+
+  function clearOutgoingTransferCache() {
+    outgoingTransferFiles.clear()
+    outgoingTransferModes.clear()
+    cancelledOutgoingTransfers.clear()
+    outgoingReplayChain = Promise.resolve()
+  }
+
+  function resetHistoryLoading() {
+    isHistoryLoading.value = false
+    pendingHistoryTransferIds.value = []
+    hasReceivedHistorySnapshot.value = false
+  }
+
+  function startHistoryLoading() {
+    if (mode.value !== 'join') {
+      resetHistoryLoading()
+
+      return
+    }
+
+    isHistoryLoading.value = true
+    pendingHistoryTransferIds.value = []
+    hasReceivedHistorySnapshot.value = false
+  }
+
+  function applyHistorySnapshot(transfers: FileTransfer[]) {
+    hasReceivedHistorySnapshot.value = true
+    pendingHistoryTransferIds.value = transfers
+      .filter(
+        (transfer) =>
+          transfer.senderId !== sessionStore.peer?.id &&
+          transfer.files.some((file) => !file.downloadUrl)
+      )
+      .map((transfer) => transfer.id)
+    isHistoryLoading.value = pendingHistoryTransferIds.value.length > 0
+  }
+
+  function settleHistoryTransfer(transferId: string) {
+    if (!pendingHistoryTransferIds.value.includes(transferId)) {
+      return
+    }
+
+    pendingHistoryTransferIds.value = pendingHistoryTransferIds.value.filter(
+      (pendingTransferId) => pendingTransferId !== transferId
+    )
+
+    if (
+      hasReceivedHistorySnapshot.value &&
+      pendingHistoryTransferIds.value.length === 0
+    ) {
+      isHistoryLoading.value = false
+    }
   }
 
   function destroyPeer(resetContext = true) {
     resetConnections()
+    finishPeerBootstrapActivity()
+    finishJoinConnectionActivity()
     peer.value?.destroy()
     peer.value = null
     if (resetContext) {
+      clearOutgoingTransferCache()
       mode.value = null
       activeRoomId.value = null
       hostPeerId.value = null
@@ -246,7 +495,9 @@ export const useSignalingStore = defineStore('signaling', () => {
 
   function ensurePeer(nextMode: LocalRoomMode) {
     bindWindowListeners()
-    const localPeer = sessionStore.ensureSession(nextMode === 'host' ? 'host' : 'member')
+    const localPeer = sessionStore.ensureSession(
+      nextMode === 'host' ? 'host' : 'member'
+    )
 
     if (
       peer.value &&
@@ -259,6 +510,7 @@ export const useSignalingStore = defineStore('signaling', () => {
     }
 
     destroyPeer(false)
+    startPeerBootstrapActivity()
 
     const nextPeer = markRaw(new Peer(localPeer.id, getPeerOptions()))
 
@@ -266,6 +518,8 @@ export const useSignalingStore = defineStore('signaling', () => {
       if (peer.value !== nextPeer) {
         return
       }
+
+      finishPeerBootstrapActivity()
 
       if (mode.value === 'host') {
         sessionStore.setConnectionState('connected')
@@ -283,7 +537,10 @@ export const useSignalingStore = defineStore('signaling', () => {
     })
 
     nextPeer.on('connection', (connection) => {
-      if (mode.value !== 'host' || connection.metadata?.roomId !== activeRoomId.value) {
+      if (
+        mode.value !== 'host' ||
+        connection.metadata?.roomId !== activeRoomId.value
+      ) {
         connection.close()
 
         return
@@ -297,6 +554,8 @@ export const useSignalingStore = defineStore('signaling', () => {
         return
       }
 
+      finishPeerBootstrapActivity()
+      resetHistoryLoading()
       sessionStore.setConnectionState('disconnected')
       roomStore.syncLocalPeer()
       setState(
@@ -311,6 +570,8 @@ export const useSignalingStore = defineStore('signaling', () => {
         return
       }
 
+      finishPeerBootstrapActivity()
+      resetHistoryLoading()
       sessionStore.setConnectionState('disconnected')
       roomStore.syncLocalPeer()
       setState('disconnected', 'Peer connection closed.')
@@ -321,6 +582,8 @@ export const useSignalingStore = defineStore('signaling', () => {
         return
       }
 
+      finishPeerBootstrapActivity()
+
       const errorType = getPeerErrorType(error)
 
       if (errorType === PeerErrorType.UnavailableID) {
@@ -329,7 +592,10 @@ export const useSignalingStore = defineStore('signaling', () => {
         return
       }
 
-      if (mode.value === 'join' && errorType === PeerErrorType.PeerUnavailable) {
+      if (
+        mode.value === 'join' &&
+        errorType === PeerErrorType.PeerUnavailable
+      ) {
         handleJoinDisconnect(
           'The host is offline or this room link is no longer reachable.'
         )
@@ -337,6 +603,7 @@ export const useSignalingStore = defineStore('signaling', () => {
         return
       }
 
+      resetHistoryLoading()
       sessionStore.setConnectionState('disconnected')
       roomStore.syncLocalPeer()
       setState(
@@ -415,6 +682,8 @@ export const useSignalingStore = defineStore('signaling', () => {
     roomStore.syncLocalPeer()
     roomStore.updateMemberConnectionState(hostPeerId.value, 'connecting')
     setState('connecting')
+    finishJoinConnectionActivity()
+    startJoinConnectionActivity()
 
     const connection = markRaw(
       activePeer.connect(hostPeerId.value, {
@@ -440,6 +709,7 @@ export const useSignalingStore = defineStore('signaling', () => {
       roomStore.syncLocalPeer()
       roomStore.updateRoomStatus('active')
       roomStore.updateMemberConnectionState(hostPeerId.value!, 'connected')
+      startHistoryLoading()
       notificationStore.pushNotification({
         title: 'Connected to host',
         detail: `Peer channel is open with host ${connection.peer}.`,
@@ -455,6 +725,7 @@ export const useSignalingStore = defineStore('signaling', () => {
           joinedAt: localPeer.joinedAt,
         },
       } satisfies MemberHelloMessage)
+      finishJoinConnectionActivity()
     })
 
     connection.on('data', (message) => {
@@ -466,6 +737,7 @@ export const useSignalingStore = defineStore('signaling', () => {
         return
       }
 
+      finishJoinConnectionActivity()
       hostConnection.value = null
       handleJoinDisconnect('The host connection closed.')
     })
@@ -475,6 +747,7 @@ export const useSignalingStore = defineStore('signaling', () => {
         return
       }
 
+      finishJoinConnectionActivity()
       handleJoinDisconnect(formatPeerError(error))
     })
   }
@@ -484,14 +757,30 @@ export const useSignalingStore = defineStore('signaling', () => {
       return
     }
 
+    if (
+      'targetPeerId' in message &&
+      typeof message.targetPeerId === 'string' &&
+      message.targetPeerId !== sessionStore.peer?.id
+    ) {
+      return
+    }
+
     if (message.type === 'host-welcome' || message.type === 'room-sync') {
       roomStore.replaceMembers(message.members)
       roomStore.replacePresenceEvents(message.presenceEvents)
 
       if (message.type === 'host-welcome') {
+        const mergedTransfers = mergeSyncedTransfers(
+          roomStore.transfers,
+          message.transfers,
+          sessionStore.peer?.id
+        )
+
         roomStore.replaceMessages(
           mergeSyncedMessages(roomStore.messages, message.messages)
         )
+        roomStore.replaceTransfers(mergedTransfers)
+        applyHistorySnapshot(mergedTransfers)
         roomStore.upsertMember({
           id: message.host.id,
           label: message.host.label,
@@ -500,6 +789,25 @@ export const useSignalingStore = defineStore('signaling', () => {
           joinedAt: message.host.joinedAt,
         })
       }
+
+      return
+    }
+
+    if (message.type === 'replay-transfer') {
+      handleReplayTransferRequest(message)
+
+      return
+    }
+
+    if (message.type === 'replay-transfer-unavailable') {
+      roomStore.failTransfer(message.transferId, message.reason)
+      settleHistoryTransfer(message.transferId)
+
+      return
+    }
+
+    if (message.type === 'transfer-cancel') {
+      handleTransferCancelled(message)
 
       return
     }
@@ -578,6 +886,8 @@ export const useSignalingStore = defineStore('signaling', () => {
 
   function handleJoinDisconnect(reason: string) {
     clearRetryTimer()
+    finishJoinConnectionActivity()
+    resetHistoryLoading()
     sessionStore.setConnectionState('disconnected')
     roomStore.syncLocalPeer()
     roomStore.updateRoomStatus('disconnected')
@@ -668,6 +978,7 @@ export const useSignalingStore = defineStore('signaling', () => {
       return false
     }
 
+    pulseNetworkActivity()
     hostConnection.value.send({
       type: 'chat-send',
       roomId: room.id,
@@ -686,9 +997,19 @@ export const useSignalingStore = defineStore('signaling', () => {
     const localPeer = sessionStore.peer
     const transferResult = roomStore.createOutgoingTransfer(selectedFiles)
 
-    if (!transferResult.transfer || !transferResult.files || !room || !localPeer) {
+    if (
+      !transferResult.transfer ||
+      !transferResult.files ||
+      !room ||
+      !localPeer
+    ) {
       return false
     }
+
+    const transfer = transferResult.transfer
+    const files = transferResult.files
+
+    outgoingTransferFiles.set(transfer.id, [...files])
 
     const recipientCount = roomStore.members.filter(
       (member) =>
@@ -696,8 +1017,20 @@ export const useSignalingStore = defineStore('signaling', () => {
     ).length
 
     if (recipientCount === 0) {
+      if (room.localMode === 'host') {
+        roomStore.completeTransfer(transfer.id)
+        notificationStore.pushNotification({
+          title: 'Files cached locally',
+          detail:
+            'No one else is connected right now. The host will replay this upload automatically when someone joins.',
+          tone: 'info',
+        })
+
+        return true
+      }
+
       roomStore.failTransfer(
-        transferResult.transfer.id,
+        transfer.id,
         'No connected peers are available to receive files.'
       )
       notificationStore.pushNotification({
@@ -709,92 +1042,323 @@ export const useSignalingStore = defineStore('signaling', () => {
       return false
     }
 
-    roomStore.updateTransferProgress(transferResult.transfer.id, 0)
+    startOutgoingTransfer(transfer.id, 'live')
+    roomStore.updateTransferProgress(transfer.id, 0)
 
     const offer: FileOfferMessage = {
       type: 'file-offer',
       roomId: room.id,
-      transferId: transferResult.transfer.id,
+      transferId: transfer.id,
       sender: {
         id: localPeer.id,
         label: localPeer.label,
       },
-      files: transferResult.transfer.files,
-      totalBytes: transferResult.transfer.totalBytes ?? 0,
+      files: transfer.files,
+      totalBytes: transfer.totalBytes ?? 0,
+      createdAt: transfer.createdAt,
     }
 
-    try {
-      if (room.localMode === 'host') {
-        broadcastToMembers(offer)
-        await streamTransferFiles(
-          transferResult.transfer,
-          transferResult.files,
-          (message) => {
-            broadcastToMembers(message)
-          }
-        )
-        broadcastToMembers({
-          type: 'file-complete',
-          roomId: room.id,
-          transferId: transferResult.transfer.id,
-        } satisfies FileCompleteMessage)
-        roomStore.completeTransfer(transferResult.transfer.id)
+    return networkActivityStore
+      .track(async () => {
+        if (room.localMode === 'host') {
+          throwIfOutgoingTransferCancelled(transfer.id)
+          broadcastToMembers(offer)
+          await streamTransferFiles(
+            transfer,
+            files,
+            (message) => {
+              broadcastToMembers(message)
+            },
+            true
+          )
+          throwIfOutgoingTransferCancelled(transfer.id)
+          broadcastToMembers({
+            type: 'file-complete',
+            roomId: room.id,
+            transferId: transfer.id,
+          } satisfies FileCompleteMessage)
+          roomStore.completeTransfer(transfer.id)
 
-        return true
-      }
-
-      if (!hostConnection.value?.open) {
-        roomStore.failTransfer(
-          transferResult.transfer.id,
-          'Reconnect to the host before sharing files.'
-        )
-
-        return false
-      }
-
-      const connection = hostConnection.value
-
-      connection.send(offer)
-      await streamTransferFiles(transferResult.transfer, transferResult.files, (message) => {
-        if (!connection.open) {
-          throw new Error('The host connection closed before the upload finished.')
+          return true
         }
 
-        connection.send(message)
+        if (!hostConnection.value?.open) {
+          roomStore.failTransfer(
+            transfer.id,
+            'Reconnect to the host before sharing files.'
+          )
+
+          return false
+        }
+
+        const connection = hostConnection.value
+
+        throwIfOutgoingTransferCancelled(transfer.id)
+        connection.send(offer)
+        await streamTransferFiles(
+          transfer,
+          files,
+          (message) => {
+            if (!connection.open) {
+              throw new Error(
+                'The host connection closed before the upload finished.'
+              )
+            }
+
+            connection.send(message)
+          },
+          true
+        )
+        throwIfOutgoingTransferCancelled(transfer.id)
+        connection.send({
+          type: 'file-complete',
+          roomId: room.id,
+          transferId: transfer.id,
+        } satisfies FileCompleteMessage)
+        roomStore.completeTransfer(transfer.id)
+
+        return true
       })
-      connection.send({
-        type: 'file-complete',
-        roomId: room.id,
-        transferId: transferResult.transfer.id,
-      } satisfies FileCompleteMessage)
-      roomStore.completeTransfer(transferResult.transfer.id)
+      .catch((error) => {
+        if (isTransferCancelledError(error)) {
+          roomStore.cancelTransfer(transfer.id)
 
-      return true
-    } catch (error) {
-      const detail =
-        error instanceof Error ? error.message : 'File transfer failed unexpectedly.'
+          return false
+        }
 
-      roomStore.failTransfer(transferResult.transfer.id, detail)
-      notificationStore.pushNotification({
-        title: 'File transfer failed',
-        detail,
-        tone: 'warning',
+        const detail =
+          error instanceof Error
+            ? error.message
+            : 'File transfer failed unexpectedly.'
+
+        roomStore.failTransfer(transfer.id, detail)
+        notificationStore.pushNotification({
+          title: 'File transfer failed',
+          detail,
+          tone: 'warning',
+        })
+
+        return false
       })
-
-      return false
-    }
+      .finally(() => {
+        finishOutgoingTransfer(transfer.id)
+      })
   }
 
   function broadcastToMembers(
     message: SignalingMessage,
     excludedPeerId?: string | null
   ) {
-    for (const [peerId, connection] of Object.entries(memberConnections.value)) {
+    for (const [peerId, connection] of Object.entries(
+      memberConnections.value
+    )) {
       if (peerId === excludedPeerId || !connection.open) {
         continue
       }
 
       connection.send(message)
+    }
+  }
+
+  function sendToMember(peerId: string, message: SignalingMessage) {
+    const connection = memberConnections.value[peerId]
+
+    if (!connection?.open) {
+      return false
+    }
+
+    connection.send(message)
+
+    return true
+  }
+
+  function relayTransferMessage(
+    message: FileOfferMessage | FileChunkMessage | FileCompleteMessage,
+    senderPeerId?: string | null
+  ) {
+    if (message.targetPeerId) {
+      sendToMember(message.targetPeerId, message)
+
+      return
+    }
+
+    broadcastToMembers(message, senderPeerId)
+  }
+
+  function notifyReplayUnavailable(
+    transferId: string,
+    recipientPeerId: string,
+    reason: string
+  ) {
+    const roomId = activeRoomId.value ?? roomStore.room?.id
+
+    if (!roomId) {
+      return
+    }
+
+    if (recipientPeerId === sessionStore.peer?.id) {
+      roomStore.failTransfer(transferId, reason)
+
+      return
+    }
+
+    const unavailableMessage = {
+      type: 'replay-transfer-unavailable',
+      roomId,
+      transferId,
+      recipientPeerId,
+      reason,
+    } satisfies ReplayTransferUnavailableMessage
+
+    if (roomStore.room?.localMode === 'host') {
+      sendToMember(recipientPeerId, unavailableMessage)
+
+      return
+    }
+
+    if (hostConnection.value?.open) {
+      hostConnection.value.send(unavailableMessage)
+    }
+  }
+
+  function notifySenderTransferCancelled(transfer: FileTransfer) {
+    const roomId = activeRoomId.value ?? roomStore.room?.id
+    const localPeerId = sessionStore.peer?.id
+
+    if (!roomId || !localPeerId || transfer.senderId === localPeerId) {
+      return
+    }
+
+    const cancelMessage = {
+      type: 'transfer-cancel',
+      roomId,
+      transferId: transfer.id,
+      targetPeerId: transfer.senderId,
+    } satisfies TransferCancelMessage
+
+    if (roomStore.room?.localMode === 'host') {
+      if (cancelMessage.targetPeerId === localPeerId) {
+        handleTransferCancelled(cancelMessage)
+
+        return
+      }
+
+      sendToMember(cancelMessage.targetPeerId, cancelMessage)
+
+      return
+    }
+
+    if (hostConnection.value?.open) {
+      hostConnection.value.send(cancelMessage)
+    }
+  }
+
+  function notifyRecipientsTransferCancelled(transferId: string) {
+    const roomId = activeRoomId.value ?? roomStore.room?.id
+
+    if (!roomId) {
+      return
+    }
+
+    const targetPeerId = outgoingTransferTargets.get(transferId) ?? null
+    const cancelMessage = {
+      type: 'transfer-cancel',
+      roomId,
+      transferId,
+      ...(targetPeerId ? { targetPeerId } : {}),
+    } satisfies TransferCancelMessage
+
+    if (roomStore.room?.localMode === 'host') {
+      if (targetPeerId) {
+        sendToMember(targetPeerId, cancelMessage)
+
+        return
+      }
+
+      broadcastToMembers(cancelMessage)
+
+      return
+    }
+
+    if (hostConnection.value?.open) {
+      hostConnection.value.send(cancelMessage)
+    }
+  }
+
+  function cancelLocalIncomingTransfer(transferId: string) {
+    cancelledIncomingTransfers.add(transferId)
+
+    const roomTransfer = roomStore.transfers.find(
+      (currentTransfer) => currentTransfer.id === transferId
+    )
+    const transfer = incomingTransfers.get(transferId)
+
+    if (transfer) {
+      transfer.failed = true
+      incomingTransfers.delete(transferId)
+      roomStore.cancelTransfer(transferId)
+      settleHistoryTransfer(transferId)
+      finishIncomingTransferActivity(transferId)
+      void disposeIncomingTransfer(transfer)
+
+      return roomTransfer ?? null
+    }
+
+    if (
+      !roomTransfer ||
+      roomTransfer.direction !== 'incoming' ||
+      roomTransfer.status === 'completed'
+    ) {
+      return null
+    }
+
+    roomStore.cancelTransfer(transferId)
+    settleHistoryTransfer(transferId)
+
+    return roomTransfer
+  }
+
+  function handleTransferCancelled(message: TransferCancelMessage) {
+    const roomTransfer = roomStore.transfers.find(
+      (currentTransfer) => currentTransfer.id === message.transferId
+    )
+
+    if (roomTransfer?.direction === 'incoming') {
+      cancelLocalIncomingTransfer(message.transferId)
+
+      return
+    }
+
+    handleOutgoingTransferCancelled(message)
+  }
+
+  function requestHistoricalTransferReplays(recipientPeerId: string) {
+    for (const transfer of listTransfersToReplay(
+      roomStore.transfers,
+      recipientPeerId
+    )) {
+      if (transfer.senderId === sessionStore.peer?.id) {
+        queueOutgoingTransferReplay(transfer.id, recipientPeerId)
+
+        continue
+      }
+
+      if (
+        sendToMember(transfer.senderId, {
+          type: 'replay-transfer',
+          roomId: activeRoomId.value ?? roomStore.room?.id ?? '',
+          transferId: transfer.id,
+          recipientPeerId,
+        } satisfies ReplayTransferRequestMessage)
+      ) {
+        continue
+      }
+
+      notifyReplayUnavailable(
+        transfer.id,
+        recipientPeerId,
+        'The original sender is no longer connected to replay this upload.'
+      )
     }
   }
 
@@ -853,7 +1417,11 @@ export const useSignalingStore = defineStore('signaling', () => {
     let didDisconnect = false
     let didActivate = false
 
-    function activateMemberConnection(nextPeerId = peerId, nextLabel = label, nextJoinedAt = joinedAt) {
+    function activateMemberConnection(
+      nextPeerId = peerId,
+      nextLabel = label,
+      nextJoinedAt = joinedAt
+    ) {
       if (didActivate) {
         return
       }
@@ -895,6 +1463,7 @@ export const useSignalingStore = defineStore('signaling', () => {
         detail: `${nextLabel} connected to the host channel.`,
         tone: 'success',
       })
+      pulseNetworkActivity()
       connection.send({
         type: 'host-welcome',
         roomId: activeRoomId.value!,
@@ -906,6 +1475,7 @@ export const useSignalingStore = defineStore('signaling', () => {
         members: roomStore.members,
         presenceEvents: roomStore.presenceEvents,
         messages: roomStore.messages,
+        transfers: buildTransferHistorySnapshot(roomStore.transfers),
       } satisfies HostWelcomeMessage)
       broadcastRoomSync()
       broadcastPresenceEvent({
@@ -914,6 +1484,7 @@ export const useSignalingStore = defineStore('signaling', () => {
         peerLabel: presenceEvent.peerLabel,
         createdAt: presenceEvent.createdAt,
       })
+      requestHistoricalTransferReplays(nextPeerId)
       setState('connected')
     }
 
@@ -950,23 +1521,73 @@ export const useSignalingStore = defineStore('signaling', () => {
         return
       }
 
+      if (message.type === 'replay-transfer') {
+        handleReplayTransferRequest(message)
+
+        return
+      }
+
       if (message.type === 'file-offer') {
-        registerIncomingTransfer(message)
-        broadcastToMembers(message, connection.peer)
+        if (
+          !message.targetPeerId ||
+          message.targetPeerId === sessionStore.peer?.id
+        ) {
+          registerIncomingTransfer(message)
+        }
+        relayTransferMessage(message, connection.peer)
 
         return
       }
 
       if (message.type === 'file-chunk') {
-        appendIncomingFileChunk(message)
-        broadcastToMembers(message, connection.peer)
+        if (
+          !message.targetPeerId ||
+          message.targetPeerId === sessionStore.peer?.id
+        ) {
+          appendIncomingFileChunk(message)
+        }
+        relayTransferMessage(message, connection.peer)
 
         return
       }
 
       if (message.type === 'file-complete') {
-        void finalizeIncomingTransfer(message.transferId)
+        if (
+          !message.targetPeerId ||
+          message.targetPeerId === sessionStore.peer?.id
+        ) {
+          void finalizeIncomingTransfer(message.transferId)
+        }
+        relayTransferMessage(message, connection.peer)
+
+        return
+      }
+
+      if (message.type === 'replay-transfer-unavailable') {
+        sendToMember(message.recipientPeerId, message)
+
+        return
+      }
+
+      if (message.type === 'transfer-cancel') {
+        if (
+          !message.targetPeerId ||
+          message.targetPeerId === sessionStore.peer?.id
+        ) {
+          handleTransferCancelled(message)
+        }
+
+        if (message.targetPeerId) {
+          if (message.targetPeerId !== sessionStore.peer?.id) {
+            sendToMember(message.targetPeerId, message)
+          }
+
+          return
+        }
+
         broadcastToMembers(message, connection.peer)
+
+        return
       }
     })
 
@@ -1012,6 +1633,9 @@ export const useSignalingStore = defineStore('signaling', () => {
         )
         disposeIncomingTransfersForPeer(peerId)
       }
+      if (hasOpenMemberConnections()) {
+        pulseNetworkActivity()
+      }
       broadcastRoomSync(connection.peer)
       broadcastPresenceEvent(
         {
@@ -1039,11 +1663,14 @@ export const useSignalingStore = defineStore('signaling', () => {
     errorMessage,
     retryCount,
     isReady,
+    isHistoryLoading,
     ensureHost,
     ensureJoiner,
     retryJoinConnection,
     sendDraftMessage,
     sendFiles,
+    cancelTransfer,
+    requestTransferReplay,
     destroyPeer,
   }
 
@@ -1116,6 +1743,10 @@ export const useSignalingStore = defineStore('signaling', () => {
       return
     }
 
+    if (hasOpenMemberConnections()) {
+      pulseNetworkActivity()
+    }
+
     broadcastToMembers({
       type: 'chat-broadcast',
       roomId: room.id,
@@ -1124,10 +1755,15 @@ export const useSignalingStore = defineStore('signaling', () => {
   }
 
   function registerIncomingTransfer(message: FileOfferMessage) {
+    if (cancelledIncomingTransfers.has(message.transferId)) {
+      return
+    }
+
     if (incomingTransfers.has(message.transferId)) {
       return
     }
 
+    startIncomingTransferActivity(message.transferId)
     incomingTransfers.set(message.transferId, {
       transferId: message.transferId,
       senderId: message.sender.id,
@@ -1154,11 +1790,16 @@ export const useSignalingStore = defineStore('signaling', () => {
       message.sender.id,
       message.sender.label,
       message.files,
-      message.totalBytes
+      message.totalBytes,
+      message.createdAt
     )
   }
 
   function appendIncomingFileChunk(message: FileChunkMessage) {
+    if (cancelledIncomingTransfers.has(message.transferId)) {
+      return
+    }
+
     const transfer = incomingTransfers.get(message.transferId)
 
     if (!transfer) {
@@ -1177,13 +1818,24 @@ export const useSignalingStore = defineStore('signaling', () => {
 
     fileBuffer.writeChain = fileBuffer.writeChain
       .then(async () => {
-        if (transfer.failed || fileBuffer.receivedChunkIndexes.has(message.chunkIndex)) {
+        if (
+          transfer.failed ||
+          cancelledIncomingTransfers.has(message.transferId) ||
+          fileBuffer.receivedChunkIndexes.has(message.chunkIndex)
+        ) {
           return
         }
 
         const store = await fileBuffer.storePromise
 
         await writeTransferStoreChunk(store, message.data)
+
+        if (
+          transfer.failed ||
+          cancelledIncomingTransfers.has(message.transferId)
+        ) {
+          return
+        }
 
         fileBuffer.receivedChunkIndexes.add(message.chunkIndex)
         fileBuffer.receivedChunks += 1
@@ -1195,7 +1847,9 @@ export const useSignalingStore = defineStore('signaling', () => {
           0
         )
         const progress =
-          transfer.totalBytes > 0 ? (receivedBytes / transfer.totalBytes) * 100 : 0
+          transfer.totalBytes > 0
+            ? (receivedBytes / transfer.totalBytes) * 100
+            : 0
 
         roomStore.updateTransferProgress(message.transferId, progress)
       })
@@ -1207,9 +1861,13 @@ export const useSignalingStore = defineStore('signaling', () => {
         transfer.failed = true
         roomStore.failTransfer(
           message.transferId,
-          error instanceof Error ? error.message : 'Failed to write the incoming file.'
+          error instanceof Error
+            ? error.message
+            : 'Failed to write the incoming file.'
         )
+        settleHistoryTransfer(message.transferId)
         incomingTransfers.delete(message.transferId)
+        finishIncomingTransferActivity(message.transferId)
         await disposeIncomingTransfer(transfer)
       })
   }
@@ -1223,17 +1881,22 @@ export const useSignalingStore = defineStore('signaling', () => {
 
     try {
       await Promise.all(
-        Array.from(transfer.files.values(), (fileBuffer) => fileBuffer.writeChain)
+        Array.from(
+          transfer.files.values(),
+          (fileBuffer) => fileBuffer.writeChain
+        )
       )
 
       const completedFiles = await Promise.all(
         Array.from(transfer.files.values(), async (fileBuffer) => {
-        if (
-          fileBuffer.totalChunks > 0 &&
-          fileBuffer.receivedChunks !== fileBuffer.totalChunks
-        ) {
-          throw new Error(`${fileBuffer.meta.name} did not finish downloading.`)
-        }
+          if (
+            fileBuffer.totalChunks > 0 &&
+            fileBuffer.receivedChunks !== fileBuffer.totalChunks
+          ) {
+            throw new Error(
+              `${fileBuffer.meta.name} did not finish downloading.`
+            )
+          }
 
           const store = await fileBuffer.storePromise
           const completedFile = await closeTransferStore(store, {
@@ -1249,6 +1912,7 @@ export const useSignalingStore = defineStore('signaling', () => {
       )
 
       roomStore.completeTransfer(transferId, completedFiles)
+      settleHistoryTransfer(transferId)
       notificationStore.pushNotification({
         title: 'Files ready',
         detail: `${transfer.senderLabel} shared ${completedFiles.length} file${completedFiles.length === 1 ? '' : 's'}.`,
@@ -1260,16 +1924,19 @@ export const useSignalingStore = defineStore('signaling', () => {
         transferId,
         error instanceof Error ? error.message : 'File assembly failed.'
       )
+      settleHistoryTransfer(transferId)
       await disposeIncomingTransfer(transfer)
     } finally {
       incomingTransfers.delete(transferId)
+      finishIncomingTransferActivity(transferId)
     }
   }
 
   async function streamTransferFiles(
     transfer: FileTransfer,
     files: File[],
-    send: (message: FileChunkMessage) => void
+    send: (message: FileChunkMessage) => void,
+    trackProgress = true
   ) {
     const roomId = roomStore.room?.id
 
@@ -1280,6 +1947,8 @@ export const useSignalingStore = defineStore('signaling', () => {
     let sentBytes = 0
 
     for (let fileIndex = 0; fileIndex < files.length; fileIndex += 1) {
+      throwIfOutgoingTransferCancelled(transfer.id)
+
       const file = files[fileIndex]
       const fileMeta = transfer.files[fileIndex]
 
@@ -1288,6 +1957,8 @@ export const useSignalingStore = defineStore('signaling', () => {
       }
 
       await readFileInChunks(file, async (chunk, chunkIndex, totalChunks) => {
+        throwIfOutgoingTransferCancelled(transfer.id)
+
         send({
           type: 'file-chunk',
           roomId,
@@ -1297,12 +1968,269 @@ export const useSignalingStore = defineStore('signaling', () => {
           totalChunks,
           data: chunk,
         })
-        sentBytes += chunk.byteLength
-        const progress =
-          (sentBytes / Math.max(transfer.totalBytes ?? sentBytes, 1)) * 100
 
-        roomStore.updateTransferProgress(transfer.id, progress)
+        if (trackProgress) {
+          sentBytes += chunk.byteLength
+          const progress =
+            (sentBytes / Math.max(transfer.totalBytes ?? sentBytes, 1)) * 100
+
+          roomStore.updateTransferProgress(transfer.id, progress)
+        }
       })
+    }
+  }
+
+  function queueOutgoingTransferReplay(
+    transferId: string,
+    recipientPeerId: string
+  ) {
+    outgoingReplayChain = outgoingReplayChain
+      .then(() =>
+        networkActivityStore.track(
+          () => replayOutgoingTransfer(transferId, recipientPeerId),
+          0
+        )
+      )
+      .catch((error) => {
+        if (isTransferCancelledError(error)) {
+          return
+        }
+
+        const detail =
+          error instanceof Error
+            ? error.message
+            : 'A cached upload could not be replayed.'
+
+        notifyReplayUnavailable(transferId, recipientPeerId, detail)
+        notificationStore.pushNotification({
+          title: 'Replay unavailable',
+          detail,
+          tone: 'warning',
+        })
+      })
+  }
+
+  function handleReplayTransferRequest(message: ReplayTransferRequestMessage) {
+    const transfer = roomStore.transfers.find(
+      (currentTransfer) => currentTransfer.id === message.transferId
+    )
+
+    if (!transfer) {
+      notifyReplayUnavailable(
+        message.transferId,
+        message.recipientPeerId,
+        'This upload is no longer available for replay.'
+      )
+
+      return
+    }
+
+    if (transfer.senderId === sessionStore.peer?.id) {
+      queueOutgoingTransferReplay(message.transferId, message.recipientPeerId)
+
+      return
+    }
+
+    if (sendToMember(transfer.senderId, { ...message })) {
+      return
+    }
+
+    notifyReplayUnavailable(
+      message.transferId,
+      message.recipientPeerId,
+      'The original sender is no longer connected to replay this upload.'
+    )
+  }
+
+  function cancelTransfer(transferId: string) {
+    const roomTransfer = roomStore.transfers.find(
+      (currentTransfer) => currentTransfer.id === transferId
+    )
+
+    if (!roomTransfer || roomTransfer.status === 'completed') {
+      return false
+    }
+
+    if (roomTransfer.direction === 'incoming') {
+      const cancelledTransfer = cancelLocalIncomingTransfer(transferId)
+
+      if (!cancelledTransfer) {
+        return false
+      }
+
+      notifySenderTransferCancelled(cancelledTransfer)
+
+      return true
+    }
+
+    const mode = outgoingTransferModes.get(transferId)
+
+    if (mode) {
+      cancelledOutgoingTransfers.add(transferId)
+      syncCancelledOutgoingTransfer(transferId, mode)
+    } else {
+      roomStore.cancelTransfer(transferId)
+    }
+
+    notifyRecipientsTransferCancelled(transferId)
+
+    return true
+  }
+
+  function requestTransferReplay(transferId: string) {
+    const room = roomStore.room
+    const localPeer = sessionStore.peer
+    const transfer = roomStore.transfers.find(
+      (currentTransfer) => currentTransfer.id === transferId
+    )
+
+    if (!room || !localPeer || !transfer || transfer.direction !== 'incoming') {
+      return false
+    }
+
+    cancelledIncomingTransfers.delete(transferId)
+    roomStore.updateTransferProgress(transferId, 0, 'queued')
+
+    const replayMessage = {
+      type: 'replay-transfer',
+      roomId: room.id,
+      transferId,
+      recipientPeerId: localPeer.id,
+    } satisfies ReplayTransferRequestMessage
+
+    if (room.localMode === 'host') {
+      handleReplayTransferRequest(replayMessage)
+
+      return true
+    }
+
+    if (!hostConnection.value?.open) {
+      roomStore.failTransfer(
+        transferId,
+        'Reconnect to the host before requesting this download again.'
+      )
+
+      return false
+    }
+
+    pulseNetworkActivity()
+    hostConnection.value.send(replayMessage)
+
+    return true
+  }
+
+  async function replayOutgoingTransfer(
+    transferId: string,
+    recipientPeerId: string
+  ) {
+    const room = roomStore.room
+    const localPeer = sessionStore.peer
+    const transfer = roomStore.transfers.find(
+      (currentTransfer) => currentTransfer.id === transferId
+    )
+    const cachedFiles = outgoingTransferFiles.get(transferId)
+
+    if (!room || !localPeer) {
+      throw new Error('Transfer replay requires an active local room session.')
+    }
+
+    if (
+      !hasReplayableFileSet(transfer, cachedFiles) ||
+      !transfer ||
+      !cachedFiles
+    ) {
+      throw new Error(
+        'The original sender no longer has the selected files cached.'
+      )
+    }
+
+    startOutgoingTransfer(transferId, 'replay', recipientPeerId)
+    roomStore.updateTransferProgress(transferId, 0, 'queued')
+
+    const offer: FileOfferMessage = {
+      type: 'file-offer',
+      roomId: room.id,
+      transferId,
+      sender: {
+        id: transfer.senderId,
+        label: transfer.senderLabel,
+      },
+      files: buildReplayTransferFiles(transfer.files),
+      totalBytes: transfer.totalBytes ?? 0,
+      createdAt: transfer.createdAt,
+      targetPeerId: recipientPeerId,
+    }
+
+    try {
+      if (room.localMode === 'host') {
+        throwIfOutgoingTransferCancelled(transferId)
+        if (!sendToMember(recipientPeerId, offer)) {
+          throw new Error('The replay recipient is no longer connected.')
+        }
+
+        await streamTransferFiles(
+          transfer,
+          cachedFiles,
+          (message) => {
+            if (
+              !sendToMember(recipientPeerId, {
+                ...message,
+                targetPeerId: recipientPeerId,
+              })
+            ) {
+              throw new Error(
+                'The replay recipient disconnected during the transfer.'
+              )
+            }
+          },
+          true
+        )
+        throwIfOutgoingTransferCancelled(transferId)
+        sendToMember(recipientPeerId, {
+          type: 'file-complete',
+          roomId: room.id,
+          transferId,
+          targetPeerId: recipientPeerId,
+        } satisfies FileCompleteMessage)
+
+        return
+      }
+
+      if (!hostConnection.value?.open) {
+        throw new Error(
+          'Reconnect to the host before replaying cached uploads.'
+        )
+      }
+
+      throwIfOutgoingTransferCancelled(transferId)
+      hostConnection.value.send(offer)
+      await streamTransferFiles(
+        transfer,
+        cachedFiles,
+        (message) => {
+          if (!hostConnection.value?.open) {
+            throw new Error(
+              'The host connection closed before the replay finished.'
+            )
+          }
+
+          hostConnection.value.send({
+            ...message,
+            targetPeerId: recipientPeerId,
+          })
+        },
+        true
+      )
+      throwIfOutgoingTransferCancelled(transferId)
+      hostConnection.value.send({
+        type: 'file-complete',
+        roomId: room.id,
+        transferId,
+        targetPeerId: recipientPeerId,
+      } satisfies FileCompleteMessage)
+    } finally {
+      roomStore.completeTransfer(transferId)
+      finishOutgoingTransfer(transferId)
     }
   }
 
@@ -1343,6 +2271,7 @@ export const useSignalingStore = defineStore('signaling', () => {
 
   function handleOffline() {
     clearRetryTimer()
+    resetHistoryLoading()
     sessionStore.setConnectionState('disconnected')
     roomStore.syncLocalPeer()
     roomStore.updateRoomStatus('disconnected')

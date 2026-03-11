@@ -19,6 +19,7 @@ const props = defineProps<{
   messages: ChatMessage[]
   transfers: FileTransfer[]
   localPeerId?: string | null
+  historyLoading?: boolean
   disabled?: boolean
   fileDisabled?: boolean
 }>()
@@ -26,6 +27,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   'update:draft': [value: string]
   send: []
+  'cancel-transfer': [transferId: string]
+  'download-transfer': [transferId: string]
   'send-files': [upload: PreparedUpload]
 }>()
 
@@ -60,6 +63,26 @@ const transcriptItems = computed(() =>
     )
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
 )
+
+function hasTransferDownloadUrl(transfer: FileTransfer) {
+  return transfer.files.some((file) => !!file.downloadUrl)
+}
+
+function shouldShowTransferCancel(transfer: FileTransfer) {
+  return transfer.status === 'queued' || transfer.status === 'transferring'
+}
+
+function shouldShowTransferReplay(transfer: FileTransfer) {
+  return (
+    transfer.direction === 'incoming' &&
+    !hasTransferDownloadUrl(transfer) &&
+    transfer.status === 'cancelled'
+  )
+}
+
+function shouldShowTransferSummary(transfer: FileTransfer) {
+  return transfer.status !== 'cancelled' && transfer.status !== 'failed'
+}
 
 function updateTranscriptScrollState() {
   if (!transcriptList.value) {
@@ -104,10 +127,12 @@ function isLocalTranscriptEntry(
   }
 
   if (entry.type === 'message') {
-    return entry.item.kind === 'text' && entry.item.senderId === props.localPeerId
+    return (
+      entry.item.kind === 'text' && entry.item.senderId === props.localPeerId
+    )
   }
 
-  return entry.item.direction === 'outgoing'
+  return entry.item.senderId === props.localPeerId
 }
 
 function handleComposerKeydown(event: KeyboardEvent) {
@@ -353,7 +378,9 @@ watch(
     }
 
     const previousTail =
-      previousItems.length > 0 ? previousItems[previousItems.length - 1] : undefined
+      previousItems.length > 0
+        ? previousItems[previousItems.length - 1]
+        : undefined
     const nextTail =
       nextItems.length > 0 ? nextItems[nextItems.length - 1] : undefined
     const isNewTail = nextTail?.item.id !== previousTail?.item.id
@@ -396,123 +423,213 @@ watch(
     @drop.capture="handleDrop"
   >
     <div class="section-heading">
-      <div>
+      <div class="chat-panel__heading">
         <p class="eyebrow">Chat</p>
+        <Transition name="ui-fade" appear>
+          <span
+            v-if="historyLoading"
+            class="chat-panel__history-spinner"
+            role="status"
+            aria-label="Loading room history"
+          />
+        </Transition>
       </div>
     </div>
 
-    <div
-      v-if="isDragTargetActive"
-      class="chat-panel__drop-overlay"
-      aria-hidden="true"
-    >
-      <p>Drop files or folders to upload them here.</p>
-    </div>
+    <Transition name="ui-fade" appear>
+      <div
+        v-if="isDragTargetActive"
+        class="chat-panel__drop-overlay"
+        aria-hidden="true"
+      >
+        <p>Drop files or folders to upload them here.</p>
+      </div>
+    </Transition>
 
     <div class="chat-panel__transcript">
-      <p v-if="isTranscriptEmpty" class="chat-panel__empty-state">
-        Chat is currently empty
-      </p>
+      <Transition name="ui-fade" appear>
+        <p v-if="isTranscriptEmpty" class="chat-panel__empty-state">
+          {{
+            historyLoading
+              ? 'Loading room history...'
+              : 'Chat is currently empty'
+          }}
+        </p>
+      </Transition>
       <ol
         ref="transcriptList"
         class="chat-panel__list"
         @scroll="handleTranscriptScroll"
       >
-        <li
-          v-for="entry in transcriptItems"
-          :key="entry.item.id"
-          :class="[
-            'chat-panel__message',
-            entry.type === 'message'
-              ? `chat-panel__message--${entry.item.kind}`
-              : 'chat-panel__message--transfer',
-            {
-              'chat-panel__message--self':
-                entry.type === 'message'
-                  ? entry.item.kind === 'text' && entry.item.senderId === props.localPeerId
-                  : entry.item.direction === 'outgoing',
-            },
-          ]"
-        >
-          <template v-if="entry.type === 'message'">
-            <div class="chat-panel__meta">
-              <strong>{{ entry.item.senderLabel }}</strong>
-              <span>{{ formatTimeLabel(entry.item.createdAt) }}</span>
-              <span>{{ entry.item.status }}</span>
-            </div>
-            <p class="chat-panel__body">
-              <template
-                v-for="(segment, index) in splitTextWithLinks(entry.item.body)"
-                :key="`${entry.item.id}-${segment.type}-${index}`"
-              >
-                <a
-                  v-if="segment.type === 'link'"
-                  :href="segment.value"
-                  target="_blank"
-                  rel="noreferrer"
+        <TransitionGroup name="ui-list" appear>
+          <li
+            v-for="entry in transcriptItems"
+            :key="entry.item.id"
+            :class="[
+              'chat-panel__message',
+              entry.type === 'message'
+                ? `chat-panel__message--${entry.item.kind}`
+                : 'chat-panel__message--transfer',
+              {
+                'chat-panel__message--self':
+                  entry.type === 'message'
+                    ? entry.item.kind === 'text' &&
+                      entry.item.senderId === props.localPeerId
+                    : entry.item.senderId === props.localPeerId,
+              },
+            ]"
+          >
+            <template v-if="entry.type === 'message'">
+              <div class="chat-panel__meta">
+                <strong>{{ entry.item.senderLabel }}</strong>
+                <span>{{ formatTimeLabel(entry.item.createdAt) }}</span>
+                <span>{{ entry.item.status }}</span>
+              </div>
+              <p class="chat-panel__body">
+                <template
+                  v-for="(segment, index) in splitTextWithLinks(
+                    entry.item.body
+                  )"
+                  :key="`${entry.item.id}-${segment.type}-${index}`"
                 >
-                  {{ segment.value }}
-                </a>
-                <span v-else>{{ segment.value }}</span>
-              </template>
-            </p>
-          </template>
-          <template v-else>
-            <div class="chat-panel__meta">
-              <strong>
-                {{ entry.item.direction === 'outgoing' ? 'You shared files' : entry.item.peerLabel }}
-              </strong>
-              <span>{{ formatTimeLabel(entry.item.createdAt) }}</span>
-              <span>{{ entry.item.status }}</span>
-            </div>
-            <div
-              v-if="entry.item.status !== 'completed'"
-              class="chat-panel__transfer-progress"
-            >
+                  <a
+                    v-if="segment.type === 'link'"
+                    :href="segment.value"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    {{ segment.value }}
+                  </a>
+                  <span v-else>{{ segment.value }}</span>
+                </template>
+              </p>
+            </template>
+            <template v-else>
+              <div class="chat-panel__meta">
+                <strong>
+                  {{
+                    entry.item.senderId === props.localPeerId
+                      ? 'You shared files'
+                      : entry.item.senderLabel
+                  }}
+                </strong>
+                <span>{{ formatTimeLabel(entry.item.createdAt) }}</span>
+                <span>{{ entry.item.status }}</span>
+              </div>
+              <Transition name="ui-fade" appear>
+                <div
+                  v-if="
+                    entry.item.status === 'queued' ||
+                    entry.item.status === 'transferring' ||
+                    shouldShowTransferCancel(entry.item) ||
+                    shouldShowTransferReplay(entry.item)
+                  "
+                  class="chat-panel__transfer-progress-row"
+                >
+                  <div
+                    v-if="
+                      entry.item.status === 'queued' ||
+                      entry.item.status === 'transferring'
+                    "
+                    class="chat-panel__transfer-progress"
+                  >
+                    <div
+                      class="chat-panel__transfer-progress-fill"
+                      :style="{ width: `${entry.item.progress}%` }"
+                    />
+                  </div>
+                  <button
+                    v-if="shouldShowTransferCancel(entry.item)"
+                    type="button"
+                    class="chat-panel__transfer-control chat-panel__transfer-control--icon"
+                    :aria-label="
+                      entry.item.senderId === props.localPeerId
+                        ? 'Cancel upload'
+                        : 'Cancel download'
+                    "
+                    @click="emit('cancel-transfer', entry.item.id)"
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path
+                        d="m6 6 12 12M18 6 6 18"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-linecap="round"
+                        stroke-width="2"
+                      />
+                    </svg>
+                  </button>
+                  <button
+                    v-else-if="shouldShowTransferReplay(entry.item)"
+                    type="button"
+                    class="chat-panel__transfer-control chat-panel__transfer-control--icon chat-panel__transfer-control--download"
+                    aria-label="Download files"
+                    @click="emit('download-transfer', entry.item.id)"
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path
+                        d="M12 4v10m0 0 4-4m-4 4-4-4M5 18h14"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="2"
+                      />
+                    </svg>
+                  </button>
+                </div>
+              </Transition>
               <div
-                class="chat-panel__transfer-progress-fill"
-                :style="{ width: `${entry.item.progress}%` }"
-              />
-            </div>
-            <div class="chat-panel__transfer-summary">
-              <span>{{ Math.round(entry.item.progress) }}%</span>
-              <span v-if="entry.item.totalBytes">
-                {{ formatBytes(entry.item.totalBytes) }}
-              </span>
-            </div>
-            <ul class="chat-panel__transfer-files">
-              <li v-for="file in entry.item.files" :key="file.id">
-                <span>{{ file.name }}</span>
-                <a v-if="file.downloadUrl" :href="file.downloadUrl" :download="file.name">
-                  Download
-                </a>
-              </li>
-            </ul>
-            <p v-if="entry.item.error" class="chat-panel__transfer-error">
-              {{ entry.item.error }}
-            </p>
-          </template>
-        </li>
+                v-if="shouldShowTransferSummary(entry.item)"
+                class="chat-panel__transfer-summary"
+              >
+                <span> {{ Math.round(entry.item.progress) }}% </span>
+                <span v-if="entry.item.totalBytes">
+                  {{ formatBytes(entry.item.totalBytes) }}
+                </span>
+              </div>
+              <ul class="chat-panel__transfer-files">
+                <li v-for="file in entry.item.files" :key="file.id">
+                  <span>{{ file.name }}</span>
+                  <a
+                    v-if="file.downloadUrl"
+                    :href="file.downloadUrl"
+                    :download="file.name"
+                  >
+                    Download
+                  </a>
+                </li>
+              </ul>
+              <Transition name="ui-fade" appear>
+                <p v-if="entry.item.error" class="chat-panel__transfer-error">
+                  {{ entry.item.error }}
+                </p>
+              </Transition>
+            </template>
+          </li>
+        </TransitionGroup>
       </ol>
 
-      <button
-        v-if="showJumpToLatest"
-        type="button"
-        class="chat-panel__jump-button"
-        aria-label="Scroll to latest messages"
-        @click="scrollTranscriptToBottom()"
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path
-            d="M12 5v12M6.5 12.5 12 18l5.5-5.5"
-            fill="none"
-            stroke="currentColor"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            stroke-width="2"
-          />
-        </svg>
-      </button>
+      <Transition name="ui-fade-scale" appear>
+        <button
+          v-if="showJumpToLatest"
+          type="button"
+          class="chat-panel__jump-button"
+          aria-label="Scroll to latest messages"
+          @click="scrollTranscriptToBottom()"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M12 5v12M6.5 12.5 12 18l5.5-5.5"
+              fill="none"
+              stroke="currentColor"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              stroke-width="2"
+            />
+          </svg>
+        </button>
+      </Transition>
     </div>
 
     <div class="chat-panel__composer">
@@ -539,98 +656,105 @@ watch(
           @input="resizeDraftInput"
           @keydown="handleComposerKeydown"
         />
-          <button
-            type="button"
-            class="chat-panel__action-button"
-            :disabled="isUploadDisabled"
-            aria-label="Attach files"
-            @click="openFilePicker"
+        <button
+          type="button"
+          class="chat-panel__action-button"
+          :disabled="isUploadDisabled"
+          aria-label="Attach files"
+          @click="openFilePicker"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            aria-hidden="true"
+            class="chat-panel__action-icon chat-panel__action-icon--attach"
           >
-            <svg
-              viewBox="0 0 24 24"
-              aria-hidden="true"
-              class="chat-panel__action-icon chat-panel__action-icon--attach"
-            >
-              <path
-                d="M8 12.5 14.86 5.64a4 4 0 1 1 5.66 5.66l-9.19 9.19a6 6 0 1 1-8.49-8.48l8.48-8.49"
-                fill="none"
-                stroke="currentColor"
+            <path
+              d="M8 12.5 14.86 5.64a4 4 0 1 1 5.66 5.66l-9.19 9.19a6 6 0 1 1-8.49-8.48l8.48-8.49"
+              fill="none"
+              stroke="currentColor"
               stroke-linecap="round"
               stroke-linejoin="round"
               stroke-width="1.8"
             />
           </svg>
         </button>
-          <button
-            type="button"
-            class="chat-panel__action-button chat-panel__action-button--send"
-            :disabled="disabled || !hasDraft"
-            aria-label="Send message"
-            @click="$emit('send')"
+        <button
+          type="button"
+          class="chat-panel__action-button chat-panel__action-button--send"
+          :disabled="disabled || !hasDraft"
+          aria-label="Send message"
+          @click="$emit('send')"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            aria-hidden="true"
+            class="chat-panel__action-icon chat-panel__action-icon--send"
           >
-            <svg
-              viewBox="0 0 24 24"
-              aria-hidden="true"
-              class="chat-panel__action-icon chat-panel__action-icon--send"
-            >
-              <path d="M4 12 20 4 14 20 11 13 4 12Z" fill="currentColor" />
-            </svg>
-          </button>
-        </div>
-    </div>
-
-    <div
-      v-if="uploadPromptMode || isPreparingUpload"
-      class="chat-panel__modal-backdrop"
-    >
-      <div class="chat-panel__modal">
-        <template v-if="isPreparingUpload">
-          <p class="eyebrow">Preparing upload</p>
-          <h3>Creating zip archive...</h3>
-          <p>
-            {{ preparingUploadLabel || 'Selected files' }}
-          </p>
-        </template>
-        <template v-else-if="uploadPromptMode === 'folder'">
-          <p class="eyebrow">Upload choice</p>
-          <h3>Folder detected. Zip all?</h3>
-          <p>
-            Folders are zipped before sending so the folder structure stays intact.
-          </p>
-          <div class="chat-panel__modal-actions">
-            <button type="button" @click="sendPendingUpload('zip')">
-              Continue
-            </button>
-            <button
-              type="button"
-              class="secondary-button"
-              @click="clearUploadPrompt"
-            >
-              Cancel Upload
-            </button>
-          </div>
-        </template>
-        <template v-else-if="uploadPromptMode === 'files'">
-          <p class="eyebrow">Upload choice</p>
-          <h3>Zip all files together?</h3>
-          <p>
-            {{ pendingUploadSelection ? describeUploadSelection(pendingUploadSelection) : '' }}
-          </p>
-          <div class="chat-panel__modal-actions">
-            <button type="button" @click="sendPendingUpload('zip')">
-              Yes
-            </button>
-            <button
-              type="button"
-              class="secondary-button"
-              @click="sendPendingUpload('files')"
-            >
-              No
-            </button>
-          </div>
-        </template>
+            <path d="M4 12 20 4 14 20 11 13 4 12Z" fill="currentColor" />
+          </svg>
+        </button>
       </div>
     </div>
+
+    <Transition name="ui-overlay" appear>
+      <div
+        v-if="uploadPromptMode || isPreparingUpload"
+        class="chat-panel__modal-backdrop"
+      >
+        <div class="chat-panel__modal">
+          <template v-if="isPreparingUpload">
+            <p class="eyebrow">Preparing upload</p>
+            <h3>Creating zip archive...</h3>
+            <p>
+              {{ preparingUploadLabel || 'Selected files' }}
+            </p>
+          </template>
+          <template v-else-if="uploadPromptMode === 'folder'">
+            <p class="eyebrow">Upload choice</p>
+            <h3>Folder detected. Zip all?</h3>
+            <p>
+              Folders are zipped before sending so the folder structure stays
+              intact.
+            </p>
+            <div class="chat-panel__modal-actions">
+              <button type="button" @click="sendPendingUpload('zip')">
+                Continue
+              </button>
+              <button
+                type="button"
+                class="secondary-button"
+                @click="clearUploadPrompt"
+              >
+                Cancel Upload
+              </button>
+            </div>
+          </template>
+          <template v-else-if="uploadPromptMode === 'files'">
+            <p class="eyebrow">Upload choice</p>
+            <h3>Zip all files together?</h3>
+            <p>
+              {{
+                pendingUploadSelection
+                  ? describeUploadSelection(pendingUploadSelection)
+                  : ''
+              }}
+            </p>
+            <div class="chat-panel__modal-actions">
+              <button type="button" @click="sendPendingUpload('zip')">
+                Yes
+              </button>
+              <button
+                type="button"
+                class="secondary-button"
+                @click="sendPendingUpload('files')"
+              >
+                No
+              </button>
+            </div>
+          </template>
+        </div>
+      </div>
+    </Transition>
   </section>
 </template>
 
@@ -647,7 +771,11 @@ watch(
 .chat-panel--drop-active {
   border-color: rgba(242, 164, 99, 0.48);
   background:
-    linear-gradient(180deg, rgba(242, 164, 99, 0.08), rgba(255, 255, 255, 0.03)),
+    linear-gradient(
+      180deg,
+      rgba(242, 164, 99, 0.08),
+      rgba(255, 255, 255, 0.03)
+    ),
     var(--surface-strong);
 }
 
@@ -656,6 +784,12 @@ watch(
   align-items: flex-start;
   justify-content: space-between;
   gap: 1rem;
+}
+
+.chat-panel__heading {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
 }
 
 h2 {
@@ -683,6 +817,15 @@ h2 {
   min-height: 0;
   overflow: hidden;
   padding-top: 1.25rem;
+}
+
+.chat-panel__history-spinner {
+  width: 0.95rem;
+  height: 0.95rem;
+  border: 2px solid rgba(255, 255, 255, 0.18);
+  border-top-color: #f2a463;
+  border-radius: 999px;
+  animation: chat-panel-history-spin 0.8s linear infinite;
 }
 
 .chat-panel__empty-state {
@@ -733,7 +876,11 @@ h2 {
   padding: 0;
   border: 1px solid rgba(242, 164, 99, 0.45);
   border-radius: 999px;
-  background: linear-gradient(135deg, rgba(242, 164, 99, 0.95), rgba(234, 116, 85, 0.92));
+  background: linear-gradient(
+    135deg,
+    rgba(242, 164, 99, 0.95),
+    rgba(234, 116, 85, 0.92)
+  );
   color: #24130d;
   box-shadow: 0 18px 34px rgba(0, 0, 0, 0.26);
 }
@@ -750,7 +897,11 @@ h2 {
 
 .chat-panel__message--self {
   align-self: flex-end;
-  background: linear-gradient(135deg, rgba(242, 164, 99, 0.28), rgba(234, 116, 85, 0.22));
+  background: linear-gradient(
+    135deg,
+    rgba(242, 164, 99, 0.28),
+    rgba(234, 116, 85, 0.22)
+  );
   border-color: rgba(242, 164, 99, 0.4);
 }
 
@@ -796,7 +947,16 @@ h2 {
   font-size: 0.86rem;
 }
 
+.chat-panel__transfer-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.35rem;
+}
+
 .chat-panel__transfer-progress {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   height: 0.5rem;
   border-radius: 999px;
@@ -821,6 +981,35 @@ h2 {
   margin: 0;
   color: var(--accent);
   font-size: 0.88rem;
+}
+
+.chat-panel__transfer-control {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2rem;
+  padding: 0.35rem 0.75rem;
+  border: 1px solid rgba(242, 164, 99, 0.36);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-main);
+  font-size: 0.82rem;
+}
+
+.chat-panel__transfer-control--icon {
+  width: 2rem;
+  min-width: 2rem;
+  padding: 0;
+}
+
+.chat-panel__transfer-control--icon svg {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+.chat-panel__transfer-control--download svg {
+  width: 1rem;
+  height: 1rem;
 }
 
 .chat-panel__composer-bar {
@@ -907,6 +1096,19 @@ h2 {
   box-shadow: var(--shadow);
 }
 
+.ui-overlay-enter-active .chat-panel__modal,
+.ui-overlay-leave-active .chat-panel__modal {
+  transition:
+    opacity 220ms var(--motion-soft),
+    transform 260ms var(--motion-spring);
+}
+
+.ui-overlay-enter-from .chat-panel__modal,
+.ui-overlay-leave-to .chat-panel__modal {
+  opacity: 0;
+  transform: translateY(0.85rem) scale(0.96);
+}
+
 .chat-panel__modal h3 {
   margin: 0.3rem 0 0.45rem;
   font-size: 1.2rem;
@@ -925,6 +1127,12 @@ h2 {
 
 .chat-panel__modal-actions > * {
   flex: 1;
+}
+
+@keyframes chat-panel-history-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 @media (max-width: 720px) {

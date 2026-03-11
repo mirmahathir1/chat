@@ -20,24 +20,6 @@ const manualJoinCode = computed(() =>
   props.room.id === props.room.hostPeerId ? props.room.id : null
 )
 
-const shareFields = computed(() => {
-  const fields = [
-    {
-      label: manualJoinCode.value ? 'Room code' : 'Room ID',
-      value: props.room.id,
-    },
-  ]
-
-  if (props.room.hostPeerId !== props.room.id) {
-    fields.push({
-      label: 'Host peer ID',
-      value: props.room.hostPeerId,
-    })
-  }
-
-  return fields
-})
-
 watchEffect(async () => {
   if (!isHostView.value) {
     qrDataUrl.value = ''
@@ -71,45 +53,31 @@ async function copyShareLink() {
 
 <template>
   <section
-    :class="['panel', 'share-panel', { 'share-panel--headerless': !showHeader }]"
+    :class="[
+      'panel',
+      'share-panel',
+      { 'share-panel--headerless': !showHeader },
+    ]"
   >
-    <div v-if="showHeader" class="section-heading">
-      <div>
-        <p class="eyebrow">Share</p>
-        <h2>{{ room.localMode === 'host' ? 'Invite payload' : 'Loaded invite' }}</h2>
+    <Transition name="ui-fade" appear>
+      <div v-if="showHeader" class="section-heading">
+        <span class="phase-chip">Invite link</span>
       </div>
-      <span class="phase-chip">Invite link</span>
-    </div>
+    </Transition>
 
-    <div v-if="isHostView" class="share-panel__qr">
-      <img :src="qrDataUrl" alt="QR code for the room invite link" />
-    </div>
-
-    <div v-if="manualJoinCode" class="share-panel__room-code">
-      <span>Room code</span>
-      <code>{{ manualJoinCode }}</code>
-      <p>Type this code on another device to connect.</p>
-    </div>
-
-    <details class="share-panel__details">
-      <summary class="share-panel__summary">Room details</summary>
-
-      <div class="share-panel__fields">
-        <div
-          v-for="field in shareFields"
-          :key="field.label"
-          class="share-panel__field"
-        >
-          <span>{{ field.label }}</span>
-          <code>{{ field.value }}</code>
-        </div>
+    <Transition name="ui-fade-scale" appear>
+      <div v-if="isHostView" class="share-panel__qr">
+        <img :src="qrDataUrl" alt="QR code for the room invite link" />
       </div>
+    </Transition>
 
-      <label class="share-panel__url">
-        <span>Share URL</span>
-        <textarea readonly :value="room.shareUrl" rows="3" />
-      </label>
-    </details>
+    <Transition name="ui-fade" appear>
+      <div v-if="manualJoinCode" class="share-panel__room-code">
+        <span>Room code</span>
+        <code>{{ manualJoinCode }}</code>
+        <p>Type this code on another device to connect.</p>
+      </div>
+    </Transition>
 
     <div class="share-panel__actions">
       <button type="button" @click="copyShareLink">
@@ -117,10 +85,12 @@ async function copyShareLink() {
       </button>
     </div>
 
-    <p v-if="copyState === 'failed'" class="share-panel__feedback">
-      Clipboard access was blocked in this browser. Copy the URL manually for
-      now.
-    </p>
+    <Transition name="ui-fade" appear>
+      <p v-if="copyState === 'failed'" class="share-panel__feedback">
+        Clipboard access was blocked in this browser. Copy the URL manually for
+        now.
+      </p>
+    </Transition>
   </section>
 </template>
 
@@ -131,6 +101,16 @@ async function copyShareLink() {
 
 .share-panel--headerless .share-panel__qr {
   margin-top: 0;
+}
+
+.share-panel--headerless .share-panel__room-code {
+  justify-items: center;
+  text-align: center;
+}
+
+.share-panel--headerless .share-panel__room-code code {
+  font-size: clamp(1.8rem, 7vw, 2.75rem);
+  letter-spacing: 0.06em;
 }
 
 .section-heading {
@@ -172,10 +152,6 @@ h2 {
   max-width: 16rem;
 }
 
-.share-panel__details {
-  margin-top: 1rem;
-}
-
 .share-panel__room-code {
   display: grid;
   gap: 0.35rem;
@@ -193,59 +169,25 @@ h2 {
   color: var(--text-muted);
 }
 
+.share-panel__room-code code {
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
 .share-panel__room-code p {
   margin: 0;
   color: var(--text-muted);
   font-size: 0.8rem;
 }
 
-.share-panel__summary {
-  cursor: pointer;
-  color: var(--text-muted);
-  font-size: 0.82rem;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.share-panel__fields {
-  display: grid;
-  gap: 0.75rem;
-  margin-top: 0.9rem;
-}
-
-.share-panel__field {
-  display: grid;
-  gap: 0.35rem;
-}
-
-.share-panel__field span,
-.share-panel__url span {
-  font-size: 0.78rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--text-muted);
-}
-
 code {
   overflow-wrap: anywhere;
   color: var(--text-main);
   font-family:
-    ui-monospace,
-    'SFMono-Regular',
-    'SF Mono',
-    Menlo,
-    Monaco,
-    Consolas,
-    'Liberation Mono',
-    monospace;
+    ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Monaco, Consolas,
+    'Liberation Mono', monospace;
   font-size: 0.75rem;
   line-height: 1.4;
-}
-
-.share-panel__url {
-  display: grid;
-  gap: 0.45rem;
-  margin-top: 1rem;
 }
 
 textarea {

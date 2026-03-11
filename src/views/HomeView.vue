@@ -11,7 +11,11 @@ const router = useRouter()
 const roomStore = useRoomStore()
 const signalingStore = useSignalingStore()
 const { room, connectedMemberCount } = storeToRefs(roomStore)
-const { isReady, state: signalingState, errorMessage } = storeToRefs(signalingStore)
+const {
+  isReady,
+  state: signalingState,
+  errorMessage,
+} = storeToRefs(signalingStore)
 const joinRoomCode = ref('')
 const joinRoomError = ref('')
 
@@ -76,25 +80,31 @@ function joinTypedRoom() {
     <section class="panel home-view__launchpad">
       <h2>Scan the QR code or type the room code to join the live room.</h2>
 
-      <div v-if="!isReady" class="home-view__status">
-        <p v-if="errorMessage">{{ errorMessage }}</p>
-        <p v-else-if="signalingState === 'disconnected'">
-          The host channel disconnected before it finished starting.
-        </p>
-        <p v-else>
-          Preparing the host channel...
-        </p>
-        <button
-          v-if="signalingState === 'error' || signalingState === 'disconnected'"
-          type="button"
-          class="secondary-button"
-          @click="retryHost"
-        >
-          Retry host
-        </button>
-      </div>
+      <Transition name="ui-fade" appear>
+        <div v-if="!isReady" class="home-view__status">
+          <p v-if="errorMessage">{{ errorMessage }}</p>
+          <p v-else-if="signalingState === 'disconnected'">
+            The host channel disconnected before it finished starting.
+          </p>
+          <p v-else>Preparing the host channel...</p>
+          <Transition name="ui-fade" appear>
+            <button
+              v-if="
+                signalingState === 'error' || signalingState === 'disconnected'
+              "
+              type="button"
+              class="secondary-button"
+              @click="retryHost"
+            >
+              Retry host
+            </button>
+          </Transition>
+        </div>
+      </Transition>
 
-      <SharePanel v-if="room && isReady" :room="room" :show-header="false" />
+      <Transition name="ui-fade-scale" appear>
+        <SharePanel v-if="room && isReady" :room="room" :show-header="false" />
+      </Transition>
 
       <form class="home-view__manual-join" @submit.prevent="joinTypedRoom">
         <p class="eyebrow">Manual join</p>
@@ -114,9 +124,11 @@ function joinTypedRoom() {
           />
           <button type="submit" class="secondary-button">Join room</button>
         </div>
-        <p v-if="joinRoomError" class="home-view__manual-join-error">
-          {{ joinRoomError }}
-        </p>
+        <Transition name="ui-fade" appear>
+          <p v-if="joinRoomError" class="home-view__manual-join-error">
+            {{ joinRoomError }}
+          </p>
+        </Transition>
       </form>
     </section>
   </main>

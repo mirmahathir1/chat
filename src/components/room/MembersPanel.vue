@@ -31,33 +31,38 @@ const orderedMembers = computed(() =>
         <p class="eyebrow">Members</p>
         <h2>{{ activeMemberCount }} active</h2>
       </div>
-      <span class="phase-chip">Host managed</span>
     </div>
 
-    <ul v-if="orderedMembers.length" class="members-list">
-      <li
-        v-for="member in orderedMembers"
-        :key="member.id"
-        class="members-list__item"
-      >
-        <div>
-          <div class="members-list__title">
-            <strong>{{ member.label }}</strong>
-            <span v-if="member.id === hostPeerId" class="member-badge"
-              >Host</span
-            >
-          </div>
-          <p>{{ member.id }}</p>
-        </div>
-        <div class="members-list__meta">
-          <span>{{ member.connectionState }}</span>
-          <span>{{ formatTimeLabel(member.joinedAt) }}</span>
-        </div>
-      </li>
-    </ul>
-    <p v-else class="members-panel__empty">
-      Remote peers will appear here after signaling is wired in.
-    </p>
+    <Transition name="ui-fade" mode="out-in" appear>
+      <ul v-if="orderedMembers.length" class="members-list">
+        <TransitionGroup name="ui-list" appear>
+          <li
+            v-for="member in orderedMembers"
+            :key="member.id"
+            class="members-list__item"
+          >
+            <div>
+              <div class="members-list__title">
+                <strong>{{ member.label }}</strong>
+                <Transition name="ui-fade" appear>
+                  <span v-if="member.id === hostPeerId" class="member-badge">
+                    Host
+                  </span>
+                </Transition>
+              </div>
+              <p>{{ member.id }}</p>
+            </div>
+            <div class="members-list__meta">
+              <span>{{ member.connectionState }}</span>
+              <span>{{ formatTimeLabel(member.joinedAt) }}</span>
+            </div>
+          </li>
+        </TransitionGroup>
+      </ul>
+      <p v-else class="members-panel__empty">
+        Remote peers will appear here after signaling is wired in.
+      </p>
+    </Transition>
   </section>
 </template>
 
@@ -116,14 +121,8 @@ h2 {
   margin: 0.35rem 0 0;
   color: var(--text-muted);
   font-family:
-    ui-monospace,
-    'SFMono-Regular',
-    'SF Mono',
-    Menlo,
-    Monaco,
-    Consolas,
-    'Liberation Mono',
-    monospace;
+    ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Monaco, Consolas,
+    'Liberation Mono', monospace;
   font-size: 0.75rem;
   line-height: 1.4;
   overflow-wrap: anywhere;

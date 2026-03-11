@@ -175,6 +175,67 @@ describe('useRoomStore', () => {
     expect(roomStore.transfers[0]?.progress).toBe(100)
   })
 
+  it('marks a transfer as cancelled without deleting it', () => {
+    const roomStore = useRoomStore()
+    const file = new File(['phase-10'], 'phase10.txt', {
+      type: 'text/plain',
+    })
+
+    roomStore.bootstrapHostedRoom('room-phase10')
+    const result = roomStore.createOutgoingTransfer([file])
+
+    roomStore.cancelTransfer(result.transfer!.id)
+
+    expect(roomStore.transfers[0]?.status).toBe('cancelled')
+  })
+
+  it('preserves the original transfer timestamp when replayed history re-registers an existing transfer', () => {
+    const roomStore = useRoomStore()
+    const originalCreatedAt = '2026-03-10T18:45:00.000Z'
+
+    roomStore.bootstrapHostedRoom('room-phase9')
+    roomStore.replaceTransfers([
+      {
+        id: 'transfer-history',
+        senderId: 'peer-host',
+        senderLabel: 'Host',
+        peerId: 'peer-host',
+        peerLabel: 'Host',
+        direction: 'incoming',
+        status: 'completed',
+        progress: 100,
+        createdAt: originalCreatedAt,
+        totalBytes: 42,
+        files: [
+          {
+            id: 'file-1',
+            name: 'history.bin',
+            size: 42,
+            mimeType: 'application/octet-stream',
+          },
+        ],
+      },
+    ])
+
+    roomStore.createIncomingTransfer(
+      'transfer-history',
+      'peer-host',
+      'Host',
+      [
+        {
+          id: 'file-1',
+          name: 'history.bin',
+          size: 42,
+          mimeType: 'application/octet-stream',
+        },
+      ],
+      42,
+      '2026-03-10T18:48:00.000Z'
+    )
+
+    expect(roomStore.transfers[0]?.createdAt).toBe(originalCreatedAt)
+  })
+
   it('clears the room state completely when the lobby is reopened', () => {
     const roomStore = useRoomStore()
 
