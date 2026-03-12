@@ -1,0 +1,1 @@
+WebRTC upload verification fixture for production Cypress.

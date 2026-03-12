@@ -5,115 +5,70 @@ export interface BackendRelayFileDescriptor {
   type: string | null
 }
 
+export interface BackendRelayUploadedFileDescriptor {
+  contentType: string
+  fileId: string
+  pathname: string
+  size: number
+}
+
 export type BackendRelayRoomEventMessage = {
   type: string
 } & Record<string, unknown>
 
-export interface CreateBackendRelayTransferRequest {
-  files: BackendRelayFileDescriptor[]
-  recipientPeerId: string
-  roomId: string
-  senderPeerId: string
-  totalBytes: number
-}
-
-export interface CreateBackendRelayTransferResponse {
-  endpoints: {
-    ackPathTemplate: string
-    cancelPath: string
-    completePath: string
-    nextChunkPath: string
-    uploadPathTemplate: string
-  }
-  expiresAt: string
-  maxChunkBytes: number
-  pollIntervalMs: number
-  sessionId: string
-  status: 'ready'
-  transferId: string
-}
-
-export interface UploadBackendRelayChunkRequest {
-  chunkIndex: number
-  data: ArrayBuffer | Blob | BufferSource
+export interface UploadBackendRelayFileRequest {
+  file: File
   fileId: string
-  senderPeerId: string
-  sessionId: string
-  totalChunks: number
+  onProgress?: (loadedBytes: number, totalBytes: number) => void
+  signal?: AbortSignal
   transferId: string
 }
 
-export interface UploadBackendRelayChunkResponse {
-  chunkIndex: number
-  expiresAt: string
-  sizeBytes: number
-  status: 'stored'
-  transferId: string
-}
-
-export interface PollBackendRelayChunkRequest {
-  afterChunkIndex: number
-  peerId: string
-  sessionId: string
-  transferId: string
-}
-
-export interface BackendRelayChunkPayload {
-  chunkIndex: number
-  data: ArrayBuffer
-  expiresAt: string
+export interface UploadBackendRelayFileResponse {
+  contentType: string
+  downloadUrl: string
+  etag: string
   fileId: string
-  sizeBytes: number
-  totalChunks: number
-  transferState: string
+  pathname: string
+  size: number
+  url: string
 }
 
-export type PollBackendRelayChunkResponse =
-  | {
-      status: 'chunk'
-      value: BackendRelayChunkPayload
-    }
-  | {
-      status: 'idle'
-      transferState: string | null
-    }
-
-export interface AckBackendRelayChunkRequest {
-  chunkIndex: number
+export interface DownloadBackendRelayFileRequest {
   fileId: string
-  peerId: string
-  sessionId: string
+  fileName: string
+  mimeType: string
+  onProgress?: (loadedBytes: number, totalBytes: number) => void
+  pathname: string
+  signal?: AbortSignal
   transferId: string
 }
 
-export interface AckBackendRelayChunkResponse {
-  chunkIndex: number
-  pendingChunks: number
+export interface DownloadBackendRelayFileResponse {
+  file: File
+}
+
+export interface AcknowledgeBackendRelayFileRequest {
+  fileId: string
+  pathname: string
+  transferId: string
+}
+
+export interface AcknowledgeBackendRelayFileResponse {
+  fileId: string
   status: 'acknowledged'
   transferId: string
 }
 
-export interface CompleteBackendRelayTransferRequest {
-  peerId: string
-  sessionId: string
-  transferId: string
-}
-
-export interface CompleteBackendRelayTransferResponse {
-  expiresAt: string
-  pendingChunks: number
-  status: 'completed'
-  transferId: string
-}
-
 export interface CancelBackendRelayTransferRequest {
-  peerId: string
+  pathnames?: string[]
+  peerId?: string
   reason?: string
-  sessionId: string
   transferId: string
 }
 
 export interface CancelBackendRelayTransferResponse {
+  deletedCount?: number
   reason: string | null
   status: 'cancelled'
   transferId: string
@@ -166,31 +121,25 @@ export interface PollBackendRelayRoomEventsResponse {
 export interface BackendRelayClient {
   readonly baseUrl: string | null
   readonly isConfigured: boolean
-  acknowledgeChunk(
-    request: AckBackendRelayChunkRequest
-  ): Promise<AckBackendRelayChunkResponse>
+  acknowledgeFile(
+    request: AcknowledgeBackendRelayFileRequest
+  ): Promise<AcknowledgeBackendRelayFileResponse>
   cancelTransfer(
     request: CancelBackendRelayTransferRequest
   ): Promise<CancelBackendRelayTransferResponse>
-  completeTransfer(
-    request: CompleteBackendRelayTransferRequest
-  ): Promise<CompleteBackendRelayTransferResponse>
-  createTransfer(
-    request: CreateBackendRelayTransferRequest
-  ): Promise<CreateBackendRelayTransferResponse>
+  downloadFile(
+    request: DownloadBackendRelayFileRequest
+  ): Promise<DownloadBackendRelayFileResponse>
   getRoomEventCursor(
     request: GetBackendRelayRoomEventCursorRequest
   ): Promise<GetBackendRelayRoomEventCursorResponse>
-  pollNextChunk(
-    request: PollBackendRelayChunkRequest
-  ): Promise<PollBackendRelayChunkResponse>
   pollRoomEvents(
     request: PollBackendRelayRoomEventsRequest
   ): Promise<PollBackendRelayRoomEventsResponse>
   publishRoomEvent(
     request: CreateBackendRelayRoomEventRequest
   ): Promise<CreateBackendRelayRoomEventResponse>
-  uploadChunk(
-    request: UploadBackendRelayChunkRequest
-  ): Promise<UploadBackendRelayChunkResponse>
+  uploadFile(
+    request: UploadBackendRelayFileRequest
+  ): Promise<UploadBackendRelayFileResponse>
 }

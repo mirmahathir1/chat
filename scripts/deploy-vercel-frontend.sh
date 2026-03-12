@@ -11,6 +11,6 @@ fi
 
 cd "${ROOT_DIR}"
 
-npm run test:run
+npm test
 npm run build
 exec vercel deploy --prod "$@"

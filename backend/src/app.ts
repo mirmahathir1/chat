@@ -2,11 +2,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { readRelayConfig, type RelayConfig } from './config.js'
 import { createRoomEventsRouteHandler } from './routes/room-events.js'
 import { createTransfersRouteHandler } from './routes/transfers.js'
-import { InMemoryChunkStore } from './services/chunk-store.js'
-import { startRelayCleanup } from './services/relay-cleanup.js'
 import { createRelayLogger } from './services/relay-logger.js'
 import { RelayRoomEventStore } from './services/room-event-store.js'
-import { RelaySessionStore } from './services/relay-session-store.js'
 
 type RequestHandler = (
   req: IncomingMessage,
@@ -14,37 +11,20 @@ type RequestHandler = (
 ) => Promise<void>
 
 export interface RelayApp {
-  chunkStore: InMemoryChunkStore
   config: RelayConfig
   handler: RequestHandler
   logger: ReturnType<typeof createRelayLogger>
-  sessionStore: RelaySessionStore
   stopCleanup: () => void
 }
 
 export function createRelayApp(config = readRelayConfig()): RelayApp {
   const logger = createRelayLogger(config.logLevel)
-  const sessionStore = new RelaySessionStore({
-    sessionTtlMs: config.sessionTtlMs,
-  })
-  const chunkStore = new InMemoryChunkStore({
-    chunkTtlMs: config.chunkTtlMs,
-    maxChunkBytes: config.maxChunkBytes,
-  })
   const roomEventStore = new RelayRoomEventStore({
     maxEventsPerRoom: 200,
   })
-  const cleanupController = startRelayCleanup({
-    chunkStore,
-    intervalMs: config.cleanupIntervalMs,
-    logger,
-    sessionStore,
-  })
   const handleTransfersRoute = createTransfersRouteHandler({
-    chunkStore,
     config,
     logger,
-    sessionStore,
   })
   const handleRoomEventsRoute = createRoomEventsRouteHandler({
     logger,
@@ -66,16 +46,16 @@ export function createRelayApp(config = readRelayConfig()): RelayApp {
 
       if (pathname === '/api/health' && req.method === 'GET') {
         sendJson(res, 200, {
+          blobConfigured: Boolean(process.env.BLOB_READ_WRITE_TOKEN?.trim()),
           cleanupIntervalMs: config.cleanupIntervalMs,
-          chunkStats: chunkStore.getStats(),
+          fileStorageMode: 'vercel-blob',
           logLevel: config.logLevel,
-          maxChunkBytes: config.maxChunkBytes,
+          maxFileBytes: config.maxFileBytes,
           pollIntervalMs: config.pollIntervalMs,
           roomEventStats: roomEventStore.getStats(),
-          sessionStats: sessionStore.getStats(),
           sessionTtlMs: config.sessionTtlMs,
           status: 'ok',
-          storageMode: 'memory',
+          storageMode: 'mixed',
         })
 
         return
@@ -126,12 +106,10 @@ export function createRelayApp(config = readRelayConfig()): RelayApp {
   }
 
   return {
-    chunkStore,
     config,
     handler,
     logger,
-    sessionStore,
-    stopCleanup: cleanupController.stop,
+    stopCleanup() {},
   }
 }
 
@@ -183,25 +161,14 @@ function applyCorsHeaders(
 
   res.setHeader(
     'Access-Control-Allow-Headers',
-    [
-      'content-type',
-      'x-relay-file-id',
-      'x-relay-sender-peer-id',
-      'x-relay-session-id',
-      'x-relay-total-chunks',
-    ].join(', ')
+    ['content-type'].join(', ')
   )
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
   res.setHeader(
     'Access-Control-Expose-Headers',
-    [
-      'x-relay-chunk-bytes',
-      'x-relay-chunk-index',
-      'x-relay-expires-at',
-      'x-relay-file-id',
-      'x-relay-total-chunks',
-      'x-relay-transfer-state',
-    ].join(', ')
+    ['content-disposition', 'content-length', 'content-type', 'etag'].join(
+      ', '
+    )
   )
   res.setHeader('Access-Control-Max-Age', '86400')
   res.setHeader('Cache-Control', 'no-store')

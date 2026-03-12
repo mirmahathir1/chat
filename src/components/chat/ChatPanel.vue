@@ -650,6 +650,7 @@ watch(
         ref="fileInput"
         type="file"
         class="chat-panel__file-input"
+        data-testid="file-input"
         multiple
         @change="handleFileInputChange"
       />
@@ -675,6 +676,7 @@ watch(
           class="chat-panel__action-button"
           :disabled="isUploadDisabled"
           aria-label="Attach files"
+          data-testid="attach-files"
           @click="openFilePicker"
         >
           <svg

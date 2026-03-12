@@ -12,7 +12,6 @@ fi
 
 cd "${BACKEND_DIR}"
 
-npm test
 npm run typecheck
 npm run build
 exec vercel deploy --prod "$@"

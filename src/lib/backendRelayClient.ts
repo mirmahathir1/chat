@@ -1,26 +1,24 @@
+import { upload } from '@vercel/blob/client'
 import type {
-  AckBackendRelayChunkRequest,
-  AckBackendRelayChunkResponse,
+  AcknowledgeBackendRelayFileRequest,
+  AcknowledgeBackendRelayFileResponse,
   BackendRelayClient,
   CancelBackendRelayTransferRequest,
   CancelBackendRelayTransferResponse,
-  CompleteBackendRelayTransferRequest,
-  CompleteBackendRelayTransferResponse,
   CreateBackendRelayRoomEventRequest,
   CreateBackendRelayRoomEventResponse,
-  CreateBackendRelayTransferRequest,
-  CreateBackendRelayTransferResponse,
+  DownloadBackendRelayFileRequest,
+  DownloadBackendRelayFileResponse,
   GetBackendRelayRoomEventCursorRequest,
   GetBackendRelayRoomEventCursorResponse,
-  PollBackendRelayChunkRequest,
-  PollBackendRelayChunkResponse,
   PollBackendRelayRoomEventsRequest,
   PollBackendRelayRoomEventsResponse,
-  UploadBackendRelayChunkRequest,
-  UploadBackendRelayChunkResponse,
+  UploadBackendRelayFileRequest,
+  UploadBackendRelayFileResponse,
 } from '@/lib/backendRelayTypes'
 
 const defaultLocalRelayBaseUrl = 'http://localhost:8787'
+const multipartUploadThresholdBytes = 5 * 1024 * 1024
 
 interface RelayEnvironment {
   readonly DEV?: boolean
@@ -89,14 +87,12 @@ export function createBackendRelayClient(
   return {
     baseUrl: resolvedBaseUrl,
     isConfigured: resolvedBaseUrl !== null,
-    acknowledgeChunk(requestBody: AckBackendRelayChunkRequest) {
-      return requestJson<AckBackendRelayChunkResponse>(
-        `/api/transfers/${requestBody.transferId}/chunks/${requestBody.chunkIndex}/ack`,
+    acknowledgeFile(requestBody: AcknowledgeBackendRelayFileRequest) {
+      return requestJson<AcknowledgeBackendRelayFileResponse>(
+        `/api/transfers/${requestBody.transferId}/files/${requestBody.fileId}/ack`,
         {
           body: JSON.stringify({
-            fileId: requestBody.fileId,
-            peerId: requestBody.peerId,
-            sessionId: requestBody.sessionId,
+            pathname: requestBody.pathname,
           }),
           headers: {
             'content-type': 'application/json',
@@ -110,9 +106,9 @@ export function createBackendRelayClient(
         `/api/transfers/${requestBody.transferId}/cancel`,
         {
           body: JSON.stringify({
+            pathnames: requestBody.pathnames ?? [],
             peerId: requestBody.peerId,
             reason: requestBody.reason,
-            sessionId: requestBody.sessionId,
           }),
           headers: {
             'content-type': 'application/json',
@@ -121,29 +117,18 @@ export function createBackendRelayClient(
         }
       )
     },
-    completeTransfer(requestBody: CompleteBackendRelayTransferRequest) {
-      return requestJson<CompleteBackendRelayTransferResponse>(
-        `/api/transfers/${requestBody.transferId}/complete`,
+    async downloadFile(requestBody: DownloadBackendRelayFileRequest) {
+      const response = await request(
+        `/api/transfers/${requestBody.transferId}/files/${requestBody.fileId}?pathname=${encodeURIComponent(requestBody.pathname)}`,
         {
-          body: JSON.stringify({
-            peerId: requestBody.peerId,
-            sessionId: requestBody.sessionId,
-          }),
-          headers: {
-            'content-type': 'application/json',
-          },
-          method: 'POST',
+          method: 'GET',
+          signal: requestBody.signal,
         }
       )
-    },
-    createTransfer(requestBody: CreateBackendRelayTransferRequest) {
-      return requestJson<CreateBackendRelayTransferResponse>('/api/transfers', {
-        body: JSON.stringify(requestBody),
-        headers: {
-          'content-type': 'application/json',
-        },
-        method: 'POST',
-      })
+
+      return {
+        file: await streamResponseToFile(response, requestBody),
+      } satisfies DownloadBackendRelayFileResponse
     },
     getRoomEventCursor(requestBody: GetBackendRelayRoomEventCursorRequest) {
       return requestJson<GetBackendRelayRoomEventCursorResponse>(
@@ -152,43 +137,6 @@ export function createBackendRelayClient(
           method: 'GET',
         }
       )
-    },
-    async pollNextChunk(requestBody: PollBackendRelayChunkRequest) {
-      const response = await request(
-        `/api/transfers/${requestBody.transferId}/chunks/next?sessionId=${encodeURIComponent(requestBody.sessionId)}&peerId=${encodeURIComponent(requestBody.peerId)}&after=${requestBody.afterChunkIndex}`,
-        {
-          method: 'GET',
-        }
-      )
-
-      if (response.status === 204) {
-        return {
-          status: 'idle',
-          transferState: response.headers.get('x-relay-transfer-state'),
-        } satisfies PollBackendRelayChunkResponse
-      }
-
-      return {
-        status: 'chunk',
-        value: {
-          chunkIndex: Number.parseInt(
-            response.headers.get('x-relay-chunk-index') ?? '-1',
-            10
-          ),
-          data: await response.arrayBuffer(),
-          expiresAt: response.headers.get('x-relay-expires-at') ?? '',
-          fileId: response.headers.get('x-relay-file-id') ?? '',
-          sizeBytes: Number.parseInt(
-            response.headers.get('x-relay-chunk-bytes') ?? '0',
-            10
-          ),
-          totalChunks: Number.parseInt(
-            response.headers.get('x-relay-total-chunks') ?? '0',
-            10
-          ),
-          transferState: response.headers.get('x-relay-transfer-state') ?? '',
-        },
-      } satisfies PollBackendRelayChunkResponse
     },
     pollRoomEvents(requestBody: PollBackendRelayRoomEventsRequest) {
       return requestJson<PollBackendRelayRoomEventsResponse>(
@@ -215,31 +163,111 @@ export function createBackendRelayClient(
         }
       )
     },
-    uploadChunk(requestBody: UploadBackendRelayChunkRequest) {
-      return requestJson<UploadBackendRelayChunkResponse>(
-        `/api/transfers/${requestBody.transferId}/chunks/${requestBody.chunkIndex}`,
-        {
-          body: toBodyInit(requestBody.data),
-          headers: {
-            'content-type': 'application/octet-stream',
-            'x-relay-file-id': requestBody.fileId,
-            'x-relay-sender-peer-id': requestBody.senderPeerId,
-            'x-relay-session-id': requestBody.sessionId,
-            'x-relay-total-chunks': String(requestBody.totalChunks),
-          },
-          method: 'POST',
-        }
+    async uploadFile(requestBody: UploadBackendRelayFileRequest) {
+      if (!resolvedBaseUrl) {
+        throw new Error(
+          'Backend relay is not configured. Set VITE_RELAY_BACKEND_URL first.'
+        )
+      }
+
+      const pathname = buildRelayBlobPath(
+        requestBody.transferId,
+        requestBody.fileId,
+        requestBody.file.name
       )
+      const result = await upload(pathname, requestBody.file, {
+        abortSignal: requestBody.signal,
+        access: 'private',
+        contentType: requestBody.file.type || undefined,
+        handleUploadUrl: new URL(
+          `/api/transfers/${requestBody.transferId}/files/${requestBody.fileId}/upload-token`,
+          `${resolvedBaseUrl}/`
+        ).toString(),
+        multipart: requestBody.file.size >= multipartUploadThresholdBytes,
+        onUploadProgress(event) {
+          requestBody.onProgress?.(event.loaded, event.total)
+        },
+      })
+
+      return {
+        contentType:
+          result.contentType ||
+          requestBody.file.type ||
+          'application/octet-stream',
+        downloadUrl: result.downloadUrl,
+        etag: result.etag,
+        fileId: requestBody.fileId,
+        pathname: result.pathname,
+        size: requestBody.file.size,
+        url: result.url,
+      } satisfies UploadBackendRelayFileResponse
     },
   }
 }
 
-function toBodyInit(data: ArrayBuffer | Blob | BufferSource): BodyInit {
-  if (data instanceof ArrayBuffer || data instanceof Blob) {
-    return data
+function buildRelayBlobPath(transferId: string, fileId: string, fileName: string) {
+  const safeName = sanitizePathSegment(fileName || 'file')
+  const uniqueSuffix = crypto.randomUUID()
+
+  return `relay/transfers/${transferId}/files/${fileId}/${uniqueSuffix}-${safeName}`
+}
+
+function sanitizePathSegment(value: string) {
+  const trimmed = value.trim()
+
+  return (trimmed || 'file').replace(/[^a-zA-Z0-9._-]+/g, '_')
+}
+
+async function streamResponseToFile(
+  response: Response,
+  request: DownloadBackendRelayFileRequest
+) {
+  const contentLengthHeader = response.headers.get('content-length')
+  const totalBytes = Number.parseInt(contentLengthHeader ?? '0', 10)
+  const fallbackMimeType =
+    response.headers.get('content-type') ||
+    request.mimeType ||
+    'application/octet-stream'
+
+  if (!response.body) {
+    const blob = await response.blob()
+    request.onProgress?.(blob.size, blob.size)
+
+    return new File([blob], request.fileName, {
+      type: fallbackMimeType,
+    })
   }
 
-  return new Blob([data])
+  const reader = response.body.getReader()
+  const chunks: ArrayBuffer[] = []
+  let loadedBytes = 0
+
+  while (true) {
+    const { done, value } = await reader.read()
+
+    if (done) {
+      break
+    }
+
+    if (!value) {
+      continue
+    }
+
+    const normalizedChunk = value.slice()
+
+    chunks.push(
+      normalizedChunk.buffer.slice(
+        normalizedChunk.byteOffset,
+        normalizedChunk.byteOffset + normalizedChunk.byteLength
+      )
+    )
+    loadedBytes += value.byteLength
+    request.onProgress?.(loadedBytes, totalBytes || loadedBytes)
+  }
+
+  return new File(chunks, request.fileName, {
+    type: fallbackMimeType,
+  })
 }
 
 async function readErrorDetail(response: Response) {

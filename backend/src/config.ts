@@ -2,20 +2,18 @@ import type { RelayLogLevel } from './services/relay-logger.js'
 
 export interface RelayConfig {
   allowedOrigins: '*' | string[]
-  chunkTtlMs: number
   cleanupIntervalMs: number
   logLevel: RelayLogLevel
-  maxChunkBytes: number
+  maxFileBytes: number
   pollIntervalMs: number
   port: number
   sessionTtlMs: number
 }
 
 const defaults = {
-  chunkTtlMs: 5 * 60 * 1000,
   cleanupIntervalMs: 60 * 1000,
   logLevel: 'info',
-  maxChunkBytes: 4 * 1024 * 1024,
+  maxFileBytes: 5 * 1024 * 1024 * 1024 * 1024,
   pollIntervalMs: 1500,
   port: 8787,
   sessionTtlMs: 15 * 60 * 1000,
@@ -64,18 +62,19 @@ function parseLogLevel(value: string | undefined): RelayLogLevel {
 }
 
 export function readRelayConfig(env = process.env): RelayConfig {
+  const configuredMaxFileBytes = parseNumber(
+    env.RELAY_MAX_FILE_BYTES,
+    parseNumber(env.RELAY_MAX_CHUNK_BYTES, defaults.maxFileBytes)
+  )
+
   return {
     allowedOrigins: parseAllowedOrigins(env.RELAY_ALLOWED_ORIGINS),
-    chunkTtlMs: parseNumber(env.RELAY_CHUNK_TTL_MS, defaults.chunkTtlMs),
     cleanupIntervalMs: parseNumber(
       env.RELAY_CLEANUP_INTERVAL_MS,
       defaults.cleanupIntervalMs
     ),
     logLevel: parseLogLevel(env.RELAY_LOG_LEVEL),
-    maxChunkBytes: parseNumber(
-      env.RELAY_MAX_CHUNK_BYTES,
-      defaults.maxChunkBytes
-    ),
+    maxFileBytes: configuredMaxFileBytes,
     pollIntervalMs: parseNumber(
       env.RELAY_POLL_INTERVAL_MS,
       defaults.pollIntervalMs

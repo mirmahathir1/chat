@@ -130,13 +130,20 @@ function joinTypedRoom() {
             id="room-code"
             v-model="joinRoomCode"
             type="text"
+            data-testid="manual-room-code"
             placeholder="amber-wave-42"
             autocapitalize="off"
             autocomplete="off"
             spellcheck="false"
             @input="joinRoomError = ''"
           />
-          <button type="submit" class="secondary-button">Join room</button>
+          <button
+            type="submit"
+            class="secondary-button"
+            data-testid="join-room-button"
+          >
+            Join room
+          </button>
         </div>
         <Transition name="ui-fade" appear>
           <p v-if="joinRoomError" class="home-view__manual-join-error">

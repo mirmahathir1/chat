@@ -47,7 +47,7 @@ function handleToggle(event: Event) {
           Backend relay is selected, but `VITE_RELAY_BACKEND_URL` is not set yet.
         </p>
       </div>
-      <label class="relay-panel__switch">
+      <label class="relay-panel__switch" data-testid="relay-switch">
         <input
           :checked="modelValue"
           type="checkbox"

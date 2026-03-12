@@ -4,23 +4,26 @@ HTTP relay backend for the relay-selected transport described in [relay.md](/Use
 
 ## What This Backend Does
 
-- creates a short-lived relay session when direct WebRTC transfer does not become ready
-- stores lightweight room events for relay-selected chat and transfer-control messages
-- accepts one chunk at a time from the sender
-- lets the recipient poll for the next available chunk
-- lets peers poll room events for relay-selected chat and transfer-control traffic
-- deletes pending chunks on acknowledgement, cancellation, or expiry
-- exposes a small diagnostics surface through `GET /api/health`
+- stores relay chat and control events in memory for relay-selected rooms
+- issues Vercel Blob upload tokens for relay file transfers
+- lets senders upload each file once, in full, directly to private Blob storage
+- lets recipients download each file once, in full, through the backend
+- deletes uploaded Blob files after recipient acknowledgement or transfer cancellation
+- exposes runtime diagnostics through `GET /api/health`
 
-## Current Storage Mode
+## Storage Mode
 
-The current implementation uses in-memory session and chunk storage. That keeps the relay contract easy to test and reason about, but it also means:
+The current backend is mixed-mode:
 
-- local development works
-- a long-lived single-process deployment works
-- stateless serverless deployment is not reliable for active relay sessions
+- room events are still in-memory
+- relay file payloads are stored in private Vercel Blob objects
 
-The health endpoint reports `storageMode: memory` so this limitation is visible at runtime.
+That means:
+
+- relay file payloads no longer depend on a single warm Vercel Function instance
+- relay chat/control polling is still process-local and can still be disrupted by serverless instance changes
+
+The health endpoint reports `storageMode: mixed`, `fileStorageMode: vercel-blob`, and `blobConfigured`.
 
 ## Local Development
 
@@ -45,14 +48,14 @@ npm run dev
 
 This uses `nodemon` to restart the backend when files under `backend/src/` change.
 
-4. Run the backend checks:
+4. Run backend checks:
 
 ```bash
 npm run typecheck
 npm run build
 ```
 
-The relay e2e coverage now lives at the repo root under Cypress:
+The repo-level relay e2e coverage still lives under Cypress:
 
 ```bash
 cd ..
@@ -61,34 +64,23 @@ npm test
 
 ## Environment Variables
 
+- `BLOB_READ_WRITE_TOKEN`
+  - required for Vercel Blob upload, download, and delete operations
 - `RELAY_PORT`
   - local HTTP port
 - `RELAY_ALLOWED_ORIGINS`
   - comma-separated browser origins allowed to call the backend
-  - use `*` only when you understand the exposure
 - `RELAY_LOG_LEVEL`
   - one of `silent`, `error`, `info`, or `debug`
-  - `info` keeps startup and relay chat send messages visible
-  - `debug` logs relay activity details
 - `RELAY_SESSION_TTL_MS`
-  - how long a relay session stays alive after activity
-- `RELAY_CHUNK_TTL_MS`
-  - how long an uploaded chunk stays available before expiry
-- `RELAY_CLEANUP_INTERVAL_MS`
-  - cleanup sweep interval for expired sessions and chunks
-- `RELAY_MAX_CHUNK_BYTES`
-  - maximum accepted upload size per chunk
+  - upload-token validity window
+- `RELAY_MAX_FILE_BYTES`
+  - maximum accepted relay file size for a single Blob upload token
+  - `RELAY_MAX_CHUNK_BYTES` is still accepted as a legacy fallback name
 - `RELAY_POLL_INTERVAL_MS`
-  - suggested polling interval returned to clients
-
-## Operational Limits
-
-- The frontend currently slices files into `4 MiB` chunks, so `RELAY_MAX_CHUNK_BYTES` must stay at or above `4194304`.
-- The default direct-to-relay fallback timeout is `4s` in the frontend.
-- Relay chunk acknowledgement waits `15s` before failing the transfer.
-- Relay sessions default to `15m` of inactivity.
-- Relay chunks default to `5m` of availability before cleanup.
-- Backend relay fallback currently activates only when exactly one recipient is connected. Multi-recipient room fanout still stays on WebRTC.
+  - suggested frontend relay poll interval for room events
+- `RELAY_CLEANUP_INTERVAL_MS`
+  - still reported in health for compatibility, but file cleanup is now driven by ack/cancel deletes instead of chunk sweeps
 
 ## Diagnostics
 
@@ -96,15 +88,14 @@ npm test
 
 - `status`
 - `storageMode`
+- `fileStorageMode`
+- `blobConfigured`
 - `logLevel`
-- `maxChunkBytes`
+- `maxFileBytes`
 - `pollIntervalMs`
 - `cleanupIntervalMs`
 - `sessionTtlMs`
-- `chunkStats`
-- `sessionStats`
-
-This is the fastest way to confirm whether the backend is reachable and whether stale sessions or pending chunks are accumulating.
+- `roomEventStats`
 
 ## HTTP Contract
 
@@ -112,50 +103,39 @@ This is the fastest way to confirm whether the backend is reachable and whether 
 
 Returns backend health plus relay diagnostics.
 
-### `POST /api/transfers`
+### `POST /api/transfers/:transferId/files/:fileId/upload-token`
 
-Creates a short-lived relay session.
+Generates a Vercel Blob client-upload token for one relay file.
 
-### `POST /api/transfers/:transferId/chunks/:chunkIndex`
+### `GET /api/transfers/:transferId/files/:fileId?pathname=...`
 
-Uploads one raw binary chunk.
+Streams a private relay file back to the recipient.
 
-Required headers:
+### `POST /api/transfers/:transferId/files/:fileId/ack`
 
-- `content-type: application/octet-stream`
-- `x-relay-session-id`
-- `x-relay-sender-peer-id`
-- `x-relay-file-id`
-- `x-relay-total-chunks`
+Deletes the uploaded Blob file after the recipient has finished downloading it.
 
-Notes:
+Request body:
 
-- `chunkIndex` is transfer-global and must increase monotonically for the transfer
-- a request body larger than `RELAY_MAX_CHUNK_BYTES` now returns `413`
-
-### `GET /api/transfers/:transferId/chunks/next`
-
-Polls for the next available chunk.
-
-Query parameters:
-
-- `sessionId`
-- `peerId`
-- `after`
-
-When no chunk is available yet, this returns `204 No Content` with `x-relay-transfer-state`.
-
-### `POST /api/transfers/:transferId/chunks/:chunkIndex/ack`
-
-Confirms recipient receipt and deletes the acknowledged chunk from the pending set.
-
-### `POST /api/transfers/:transferId/complete`
-
-Marks the sender side as complete.
+```json
+{
+  "pathname": "relay/transfers/..."
+}
+```
 
 ### `POST /api/transfers/:transferId/cancel`
 
-Cancels the relay session and removes pending chunks.
+Deletes any uploaded Blob files associated with the cancelled relay transfer.
+
+Request body:
+
+```json
+{
+  "pathnames": ["relay/transfers/..."],
+  "peerId": "optional-peer-id",
+  "reason": "optional reason"
+}
+```
 
 ## Deployment
 
@@ -167,22 +147,8 @@ The repo ships Vercel shell wrappers at the root:
 ./scripts/deploy-vercel-backend.sh
 ```
 
-What those scripts currently guarantee:
+For production you must attach a Blob store to the Vercel backend project so `BLOB_READ_WRITE_TOKEN` is available.
 
-- the backend project is linked through the Vercel CLI
-- environment variables can be pulled into a local file
-- tests, typecheck, and build run before deploy
+## Current Caveat
 
-What they do not change:
-
-- the backend still reports `storageMode: memory`
-- serverless cold starts or process replacement can interrupt active relay sessions
-
-If you need reliable production relay delivery on Vercel, the next storage step is replacing the in-memory stores with a short-lived durable adapter while preserving the same route contract.
-
-## Cost and Failure Notes
-
-- Relay traffic moves bytes through your backend instead of direct peer transport, so bandwidth cost grows with every fallback transfer.
-- Polling adds latency compared to a working direct WebRTC path.
-- Cancellation, cleanup, and health diagnostics are implemented, but the storage mode remains process-local.
-- If the room control channel dies entirely, backend relay cannot rescue the transfer because the app still uses the room channel for relay coordination.
+Relay-selected chat and control messages still use the in-memory room-event store. File payloads are now durable on Vercel Blob, but the room-event channel itself is not yet durable across all serverless instance changes.

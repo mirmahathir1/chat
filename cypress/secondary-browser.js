@@ -1,6 +1,14 @@
+import path from 'node:path'
 import puppeteer from 'puppeteer'
 
 const chatDraftSelector = '[data-testid="chat-draft"]'
+const fileInputSelector = '[data-testid="file-input"], .chat-panel__file-input'
+const joinRoomButtonSelector =
+  '[data-testid="join-room-button"], .home-view__manual-join-row button[type="submit"]'
+const manualRoomCodeSelector = '[data-testid="manual-room-code"], #room-code'
+const relaySwitchSelector = '[data-testid="relay-switch"], .relay-panel__switch'
+const relayToggleSelector =
+  '[data-testid="relay-toggle"], .relay-panel__switch input[type="checkbox"]'
 const sendMessageSelector = '[data-testid="send-message"]'
 
 let browser = null
@@ -34,6 +42,39 @@ async function waitForEnabledSelector(currentPage, selector, timeoutMs) {
   )
 }
 
+async function waitForVisibleSelector(currentPage, selector, timeoutMs) {
+  await currentPage.waitForSelector(selector, {
+    timeout: timeoutMs,
+    visible: true,
+  })
+}
+
+async function waitForHomeReady(currentPage, timeoutMs) {
+  await waitForVisibleSelector(currentPage, manualRoomCodeSelector, timeoutMs)
+  await waitForVisibleSelector(currentPage, joinRoomButtonSelector, timeoutMs)
+}
+
+async function setRelayMode(currentPage, enabled) {
+  await waitForVisibleSelector(currentPage, relaySwitchSelector, 20000)
+
+  const isChecked = await currentPage.$eval(
+    relayToggleSelector,
+    (element) => {
+      if (!(element instanceof HTMLInputElement)) {
+        throw new Error('Relay toggle is not an input.')
+      }
+
+      return element.checked
+    }
+  )
+
+  if (isChecked === enabled) {
+    return
+  }
+
+  await currentPage.click(relaySwitchSelector)
+}
+
 export async function closeSecondaryBrowser() {
   if (page) {
     await page.close()
@@ -61,9 +102,14 @@ export async function openSecondaryBrowser(payload) {
   await page.goto(payload.url, {
     waitUntil: 'domcontentloaded',
   })
-  await page.waitForSelector(chatDraftSelector, {
-    timeout: 20000,
-  })
+
+  if (payload.waitFor === 'homeReady') {
+    await waitForHomeReady(page, 20000)
+
+    return
+  }
+
+  await waitForEnabledSelector(page, chatDraftSelector, 20000)
 }
 
 export async function getSecondaryBrowserBodyText() {
@@ -76,12 +122,12 @@ export async function secondaryBrowserSendMessage(payload) {
   const currentPage = getPage()
 
   await waitForEnabledSelector(currentPage, chatDraftSelector, 20000)
-  await waitForEnabledSelector(currentPage, sendMessageSelector, 20000)
   await currentPage.click(chatDraftSelector, {
     clickCount: 3,
   })
   await currentPage.keyboard.press('Backspace')
   await currentPage.type(chatDraftSelector, payload.text)
+  await waitForEnabledSelector(currentPage, sendMessageSelector, 20000)
   await currentPage.click(sendMessageSelector)
 }
 
@@ -89,6 +135,46 @@ export async function secondaryBrowserWaitForChatReady() {
   const currentPage = getPage()
 
   await waitForEnabledSelector(currentPage, chatDraftSelector, 20000)
+}
+
+export async function secondaryBrowserJoinRoom(payload) {
+  const currentPage = getPage()
+
+  await waitForHomeReady(currentPage, 20000)
+
+  if (payload.useRelay) {
+    await setRelayMode(currentPage, true)
+  }
+
+  await currentPage.click(manualRoomCodeSelector, {
+    clickCount: 3,
+  })
+  await currentPage.keyboard.press('Backspace')
+  await currentPage.type(manualRoomCodeSelector, payload.roomCode)
+  await currentPage.click(joinRoomButtonSelector)
+  await secondaryBrowserWaitForChatReady()
+}
+
+export async function secondaryBrowserSendFile(payload) {
+  const currentPage = getPage()
+  const absolutePath = path.resolve(payload.filePath)
+
+  await waitForEnabledSelector(currentPage, chatDraftSelector, 20000)
+  const fileInput = await currentPage.$(fileInputSelector)
+
+  if (!fileInput) {
+    throw new Error('Secondary browser file input was not found.')
+  }
+
+  await fileInput.uploadFile(absolutePath)
+  await currentPage.$eval(fileInputSelector, (input) => {
+    if (!(input instanceof HTMLInputElement)) {
+      throw new Error('Selected element is not a file input.')
+    }
+
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+  })
 }
 
 export async function secondaryBrowserWaitForText(payload) {

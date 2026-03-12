@@ -15,6 +15,7 @@
     "test:e2e:open": "env -u ELECTRON_RUN_AS_NODE cypress open --config-file cypress.config.js"
   },
   "dependencies": {
+    "@vercel/blob": "^2.3.1",
     "@zip.js/zip.js": "^2.8.23",
     "peerjs": "^1.5.5",
     "pinia": "^3.0.4",

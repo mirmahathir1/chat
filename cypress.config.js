@@ -2,7 +2,9 @@ import { defineConfig } from 'cypress'
 import {
   closeSecondaryBrowser,
   getSecondaryBrowserBodyText,
+  secondaryBrowserJoinRoom,
   openSecondaryBrowser,
+  secondaryBrowserSendFile,
   secondaryBrowserSendMessage,
   secondaryBrowserWaitForChatReady,
   secondaryBrowserWaitForText,
@@ -10,7 +12,7 @@ import {
 
 export default defineConfig({
   e2e: {
-    baseUrl: 'http://localhost:4173',
+    baseUrl: process.env.CYPRESS_BASE_URL ?? 'http://localhost:4173',
     specPattern: 'cypress/e2e/**/*.cy.ts',
     supportFile: 'cypress/support/e2e.ts',
     setupNodeEvents(on) {
@@ -32,8 +34,18 @@ export default defineConfig({
         async 'secondaryBrowser:getBodyText'() {
           return await getSecondaryBrowserBodyText()
         },
+        async 'secondaryBrowser:joinRoom'(payload) {
+          await secondaryBrowserJoinRoom(payload)
+
+          return null
+        },
         async 'secondaryBrowser:sendMessage'(payload) {
           await secondaryBrowserSendMessage(payload)
+
+          return null
+        },
+        async 'secondaryBrowser:sendFile'(payload) {
+          await secondaryBrowserSendFile(payload)
 
           return null
         },
@@ -52,6 +64,6 @@ export default defineConfig({
   },
   screenshotOnRunFailure: true,
   video: false,
-  taskTimeout: 30000,
-  defaultCommandTimeout: 15000,
+  taskTimeout: 90000,
+  defaultCommandTimeout: 20000,
 })

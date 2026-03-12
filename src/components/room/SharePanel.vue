@@ -74,7 +74,7 @@ async function copyShareLink() {
     <Transition name="ui-fade" appear>
       <div v-if="manualJoinCode" class="share-panel__room-code">
         <span>Room code</span>
-        <code>{{ manualJoinCode }}</code>
+        <code data-testid="room-code-value">{{ manualJoinCode }}</code>
         <p>Type this code on another device to connect.</p>
       </div>
     </Transition>
