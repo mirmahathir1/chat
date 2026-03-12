@@ -7,7 +7,11 @@ import NotificationPanel from '@/components/notifications/NotificationPanel.vue'
 import MembersPanel from '@/components/room/MembersPanel.vue'
 import SharePanel from '@/components/room/SharePanel.vue'
 import type { PreparedUpload } from '@/lib/uploadSelection'
-import { getHostPeerIdFromQuery, isGeneratedId } from '@/lib/roomLink'
+import {
+  getHostPeerIdFromQuery,
+  getTransferTransportFromQuery,
+  isGeneratedId,
+} from '@/lib/roomLink'
 import { useNotificationStore } from '@/stores/notifications'
 import { useRoomStore } from '@/stores/room'
 import { useSessionStore } from '@/stores/session'
@@ -28,6 +32,7 @@ const {
   draftMessage,
   isJoinView,
   connectedMemberCount,
+  preferBackendRelay,
 } = storeToRefs(roomStore)
 const { items: notifications } = storeToRefs(notificationStore)
 const {
@@ -43,6 +48,9 @@ const hasJoinQuery = computed(() =>
   Object.prototype.hasOwnProperty.call(route.query, 'host')
 )
 const joinHostPeerId = computed(() => getHostPeerIdFromQuery(route.query.host))
+const inviteTransport = computed(() =>
+  getTransferTransportFromQuery(route.query.transport)
+)
 const isLeftDrawerOpen = ref(false)
 const isRightDrawerOpen = ref(false)
 const joinLinkIssue = computed(() => {
@@ -132,14 +140,20 @@ const hostDisconnectedDetail = computed(
 const localPeerLabel = computed(() => sessionStore.peer?.label ?? 'Unassigned')
 
 watch(
-  [roomIdParam, joinLinkIssue, joinHostPeerId],
-  ([roomId, linkIssue, hostPeerId]) => {
+  [roomIdParam, joinLinkIssue, joinHostPeerId, inviteTransport],
+  ([roomId, linkIssue, hostPeerId, nextInviteTransport]) => {
     if (!roomId || linkIssue) {
       return
     }
 
     if (hostPeerId) {
-      roomStore.prepareJoinRoom(roomId, hostPeerId)
+      roomStore.prepareJoinRoom(
+        roomId,
+        hostPeerId,
+        nextInviteTransport === null
+          ? preferBackendRelay.value
+          : nextInviteTransport === 'backend-relay'
+      )
       signalingStore.ensureJoiner(roomId, hostPeerId)
 
       return

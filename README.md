@@ -1,6 +1,6 @@
 # Hosted P2P Chat
 
-Hosted room chat built with Vue 3, Vite, TypeScript, Pinia, Vue Router, Vitest, ESLint, and Prettier.
+Hosted room chat built with Vue 3, Vite, TypeScript, Pinia, Vue Router, Cypress, ESLint, and Prettier.
 
 ## Available scripts
 
@@ -9,7 +9,8 @@ Hosted room chat built with Vue 3, Vite, TypeScript, Pinia, Vue Router, Vitest, 
 - `npm run preview` serves the production build locally
 - `npm run lint` runs ESLint
 - `npm run format` runs Prettier
-- `npm run test:run` runs Vitest once
+- `npm test` runs the Cypress relay e2e flow against local frontend and backend servers
+- `npm run test:e2e:open` opens Cypress for local interactive runs
 
 ## Deployment
 

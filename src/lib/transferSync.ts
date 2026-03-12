@@ -1,7 +1,14 @@
+import { normalizeTransfer } from '@/lib/transferTransport'
 import type { FileTransfer, TransferDirection, TransferFile } from '@/types/chat'
 
 function stripDownloadUrls(files: TransferFile[]) {
-  return files.map(({ downloadUrl, ...file }) => file)
+  return files.map((file) => {
+    const nextFile = { ...file }
+
+    delete nextFile.downloadUrl
+
+    return nextFile
+  })
 }
 
 function mergeTransferFiles(localFiles: TransferFile[], remoteFiles: TransferFile[]) {
@@ -52,8 +59,8 @@ export function mergeSyncedTransfers(
         : 'incoming'
 
     return {
-      ...(localTransfer ?? remoteTransfer),
-      ...remoteTransfer,
+      ...normalizeTransfer(localTransfer ?? remoteTransfer),
+      ...normalizeTransfer(remoteTransfer),
       direction,
       files: mergeTransferFiles(localTransfer?.files ?? [], remoteTransfer.files),
     }
@@ -62,7 +69,7 @@ export function mergeSyncedTransfers(
     (transfer) => !remoteTransferIds.has(transfer.id)
   )
 
-  return [...mergedTransfers, ...localOnlyTransfers].sort((left, right) =>
-    left.createdAt.localeCompare(right.createdAt)
+  return [...mergedTransfers, ...localOnlyTransfers.map(normalizeTransfer)].sort(
+    (left, right) => left.createdAt.localeCompare(right.createdAt)
   )
 }

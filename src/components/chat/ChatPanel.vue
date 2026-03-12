@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
-import { formatBytes } from '@/lib/fileTransfer'
+import { formatBytes, formatTransferSpeed } from '@/lib/fileTransfer'
+import { getTransferTransportLabel } from '@/lib/transferTransport'
 import { splitTextWithLinks } from '@/lib/linkify'
 import { formatTimeLabel } from '@/lib/time'
 import {
@@ -459,12 +460,14 @@ watch(
       <ol
         ref="transcriptList"
         class="chat-panel__list"
+        data-testid="chat-transcript"
         @scroll="handleTranscriptScroll"
       >
         <TransitionGroup name="ui-list" appear>
           <li
             v-for="entry in transcriptItems"
             :key="entry.item.id"
+            data-testid="chat-entry"
             :class="[
               'chat-panel__message',
               entry.type === 'message'
@@ -515,6 +518,7 @@ watch(
                 </strong>
                 <span>{{ formatTimeLabel(entry.item.createdAt) }}</span>
                 <span>{{ entry.item.status }}</span>
+                <span>{{ getTransferTransportLabel(entry.item.transport) }}</span>
               </div>
               <Transition name="ui-fade" appear>
                 <div
@@ -587,6 +591,15 @@ watch(
                 <span v-if="entry.item.totalBytes">
                   {{ formatBytes(entry.item.totalBytes) }}
                 </span>
+                <span
+                  v-if="
+                    entry.item.status === 'transferring' &&
+                    entry.item.bytesPerSecond
+                  "
+                >
+                  {{ formatTransferSpeed(entry.item.bytesPerSecond) }}
+                </span>
+                <span>{{ getTransferTransportLabel(entry.item.transport) }}</span>
               </div>
               <ul class="chat-panel__transfer-files">
                 <li v-for="file in entry.item.files" :key="file.id">
@@ -647,6 +660,7 @@ watch(
           v-model="draftModel"
           rows="1"
           class="chat-panel__draft-input"
+          data-testid="chat-draft"
           :disabled="disabled"
           :placeholder="
             disabled
@@ -683,6 +697,7 @@ watch(
           class="chat-panel__action-button chat-panel__action-button--send"
           :disabled="disabled || !hasDraft"
           aria-label="Send message"
+          data-testid="send-message"
           @click="$emit('send')"
         >
           <svg

@@ -80,7 +80,12 @@ async function copyShareLink() {
     </Transition>
 
     <div class="share-panel__actions">
-      <button type="button" @click="copyShareLink">
+      <button
+        type="button"
+        data-testid="copy-join-link"
+        :data-share-url="room.shareUrl"
+        @click="copyShareLink"
+      >
         {{ copyState === 'copied' ? 'Link copied' : 'Copy join link' }}
       </button>
     </div>

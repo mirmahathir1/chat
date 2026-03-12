@@ -28,6 +28,17 @@
 - Confirm completed downloads expose working download links.
 - Confirm oversized files or too many files are rejected cleanly.
 
+## Relay fallback
+
+- Leave the relay switch off and confirm failed direct transfers do not switch to backend relay.
+- Enable the relay switch on the home page before joining and confirm that preference carries into the room.
+- Enable the relay switch in-room and confirm the status pill still shows `WebRTC` while direct transfer works.
+- Force a slow or unavailable direct transfer and confirm the transfer switches to `Backend relay`.
+- Cancel a backend relay transfer from the sender and confirm the recipient stops polling cleanly.
+- Cancel a backend relay transfer from the recipient and confirm the sender stops uploading cleanly.
+- Interrupt recipient polling during backend relay and confirm the transfer fails with a clear message instead of hanging forever.
+- Re-enable connectivity and retry a new transfer after a failed backend relay session.
+
 ## Recovery and failure states
 
 - Disconnect the joiner network during chat and file upload.

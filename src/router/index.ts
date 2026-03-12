@@ -57,8 +57,4 @@ router.beforeEach((to) => {
   return true
 })
 
-export function resetInitialNavigationGuardForTests() {
-  hasHandledInitialNavigation = false
-}
-
 export default router

@@ -1,0 +1,19 @@
+{
+  "name": "relay-backend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "./scripts/dev.sh",
+    "build": "tsc -p tsconfig.json && mkdir -p public && printf '<!doctype html><title>chat-backend</title>' > public/index.html",
+    "start": "node dist/src/server.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^25.4.0",
+    "@vercel/node": "^5.6.15",
+    "nodemon": "^3.1.14",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

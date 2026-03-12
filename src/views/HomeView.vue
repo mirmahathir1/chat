@@ -2,6 +2,7 @@
 import { storeToRefs } from 'pinia'
 import { ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import RelayPreferencePanel from '@/components/room/RelayPreferencePanel.vue'
 import { normalizeHumanReadableId } from '@/lib/humanId'
 import SharePanel from '@/components/room/SharePanel.vue'
 import { useRoomStore } from '@/stores/room'
@@ -10,7 +11,13 @@ import { useSignalingStore } from '@/stores/signaling'
 const router = useRouter()
 const roomStore = useRoomStore()
 const signalingStore = useSignalingStore()
-const { room, connectedMemberCount } = storeToRefs(roomStore)
+const {
+  room,
+  connectedMemberCount,
+  preferBackendRelay,
+  activeTransferTransport,
+  relayBackendConfigured,
+} = storeToRefs(roomStore)
 const {
   isReady,
   state: signalingState,
@@ -70,6 +77,7 @@ function joinTypedRoom() {
     },
     query: {
       host: normalizedRoomCode,
+      transport: preferBackendRelay.value ? 'backend-relay' : 'webrtc',
     },
   })
 }
@@ -105,6 +113,12 @@ function joinTypedRoom() {
       <Transition name="ui-fade-scale" appear>
         <SharePanel v-if="room && isReady" :room="room" :show-header="false" />
       </Transition>
+
+      <RelayPreferencePanel
+        v-model="preferBackendRelay"
+        :configured="relayBackendConfigured"
+        :transport="activeTransferTransport"
+      />
 
       <form class="home-view__manual-join" @submit.prevent="joinTypedRoom">
         <p class="eyebrow">Manual join</p>
@@ -162,7 +176,7 @@ h2 {
 .home-view__manual-join {
   display: grid;
   gap: 0.75rem;
-  margin-top: 1.25rem;
+  margin-top: 1rem;
   padding-top: 1.25rem;
   border-top: 1px solid var(--border);
 }

@@ -4,7 +4,7 @@ import type { TransferFile } from '@/types/chat'
 export const maxTransferFiles = 500
 export const maxTransferFileBytes = Number.POSITIVE_INFINITY
 export const maxTransferTotalBytes = Number.POSITIVE_INFINITY
-export const transferChunkBytes = 12 * 1024
+export const transferChunkBytes = 4 * 1024 * 1024
 
 export interface TransferValidationResult {
   files: File[] | null
@@ -87,4 +87,8 @@ export function formatBytes(bytes: number) {
   }
 
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+export function formatTransferSpeed(bytesPerSecond: number) {
+  return `${formatBytes(Math.max(bytesPerSecond, 0))}/s`
 }

@@ -6,7 +6,16 @@ import tseslint from 'typescript-eslint'
 
 export default tseslint.config(
   {
-    ignores: ['coverage', 'dist', 'node_modules', 'tmp'],
+    ignores: [
+      'coverage',
+      'dist',
+      '**/dist',
+      '**/dist/**',
+      'node_modules',
+      'tmp',
+      'cypress/screenshots',
+      'cypress/videos',
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
@@ -27,6 +36,24 @@ export default tseslint.config(
     },
     rules: {
       'vue/multi-word-component-names': 'off',
+    },
+  },
+  {
+    files: ['cypress/**/*.{ts,js}', 'cypress.config.js'],
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+        ...globals.node,
+        Cypress: 'readonly',
+        cy: 'readonly',
+        describe: 'readonly',
+        expect: 'readonly',
+        it: 'readonly',
+        before: 'readonly',
+        beforeEach: 'readonly',
+        after: 'readonly',
+        afterEach: 'readonly',
+      },
     },
   },
   eslintConfigPrettier

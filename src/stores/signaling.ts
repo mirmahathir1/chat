@@ -1,7 +1,9 @@
 import Peer, { PeerErrorType, type DataConnection } from 'peerjs'
 import { defineStore } from 'pinia'
-import { computed, markRaw, ref, shallowRef } from 'vue'
-import { readFileInChunks } from '@/lib/fileTransfer'
+import { computed, markRaw, ref, shallowRef, watch } from 'vue'
+import { createBackendRelayClient } from '@/lib/backendRelayClient'
+import { readFileInChunks, transferChunkBytes } from '@/lib/fileTransfer'
+import { pollBackendRelay } from '@/lib/backendRelayPolling'
 import { mergeSyncedMessages } from '@/lib/messageSync'
 import { getPeerOptions } from '@/lib/peerConfig'
 import {
@@ -37,6 +39,7 @@ import type {
 
 interface MemberHelloMessage {
   type: 'member-hello'
+  preferBackendRelay: boolean
   roomId: string
   peer: Pick<PeerIdentity, 'id' | 'label' | 'joinedAt'>
 }
@@ -44,6 +47,7 @@ interface MemberHelloMessage {
 interface HostWelcomeMessage {
   type: 'host-welcome'
   roomId: string
+  preferBackendRelay: boolean
   host: Pick<PeerIdentity, 'id' | 'label' | 'joinedAt'>
   members: PeerIdentity[]
   presenceEvents: PresenceEvent[]
@@ -53,9 +57,17 @@ interface HostWelcomeMessage {
 
 interface RoomSyncMessage {
   type: 'room-sync'
+  preferBackendRelay: boolean
   roomId: string
   members: PeerIdentity[]
   presenceEvents: PresenceEvent[]
+}
+
+interface RelayPreferenceMessage {
+  type: 'relay-preference'
+  peerId: string
+  preferBackendRelay: boolean
+  roomId: string
 }
 
 interface PresenceBroadcastMessage {
@@ -94,6 +106,14 @@ interface FileOfferMessage {
   targetPeerId?: string
 }
 
+interface FileOfferAckMessage {
+  type: 'file-offer-ack'
+  roomId: string
+  transferId: string
+  peerId: string
+  targetPeerId: string
+}
+
 interface FileChunkMessage {
   type: 'file-chunk'
   roomId: string
@@ -103,6 +123,36 @@ interface FileChunkMessage {
   totalChunks: number
   data: ArrayBuffer
   targetPeerId?: string
+}
+
+interface RelayTransferSessionMessage {
+  expiresAt: string
+  maxChunkBytes: number
+  pollIntervalMs: number
+  sessionId: string
+  transferId: string
+}
+
+interface RelayTransferOfferMessage {
+  type: 'relay-transfer-offer'
+  roomId: string
+  transferId: string
+  sender: Pick<PeerIdentity, 'id' | 'label'>
+  files: TransferFile[]
+  totalBytes: number
+  createdAt?: string
+  relay: RelayTransferSessionMessage
+  targetPeerId: string
+}
+
+interface RelayChunkAckMessage {
+  type: 'relay-chunk-ack'
+  roomId: string
+  transferId: string
+  chunkIndex: number
+  fileId: string
+  peerId: string
+  targetPeerId: string
 }
 
 interface FileCompleteMessage {
@@ -142,14 +192,21 @@ type SignalingMessage =
   | ChatSendMessage
   | ChatBroadcastMessage
   | ChatRejectedMessage
+  | RelayPreferenceMessage
   | FileOfferMessage
+  | FileOfferAckMessage
   | FileChunkMessage
+  | RelayTransferOfferMessage
+  | RelayChunkAckMessage
   | FileCompleteMessage
   | ReplayTransferRequestMessage
   | ReplayTransferUnavailableMessage
   | TransferCancelMessage
 
 const maxRetryAttempts = 3
+const relayOfferAckTimeoutMs = 4_000
+const relayChunkAckTimeoutMs = 15_000
+const minTransferSpeedSampleWindowMs = 200
 type OutgoingTransferMode = 'live' | 'replay'
 
 interface IncomingFileBuffer {
@@ -171,6 +228,44 @@ interface IncomingTransferBuffer {
   failed: boolean
 }
 
+interface PendingDirectOfferAck {
+  recipientPeerId: string
+  resolve: () => void
+  reject: (error: unknown) => void
+  timeoutId: number
+}
+
+interface PendingRelayChunkAck {
+  resolve: () => void
+  reject: (error: unknown) => void
+  timeoutId: number
+}
+
+interface OutgoingRelayTransferSession {
+  expiresAt: string
+  maxChunkBytes: number
+  recipientPeerId: string
+  relayTransferId: string
+  sessionId: string
+}
+
+interface IncomingRelayTransferSession {
+  expiresAt: string
+  lastChunkIndex: number
+  maxChunkBytes: number
+  pollController: AbortController
+  pollIntervalMs: number
+  relayTransferId: string
+  sessionId: string
+  senderPeerId: string
+}
+
+interface TransferSpeedSample {
+  bytes: number
+  bytesPerSecond?: number
+  updatedAt: number
+}
+
 class TransferCancelledError extends Error {
   transferId: string
 
@@ -187,6 +282,10 @@ function isTransferCancelledError(
   return error instanceof TransferCancelledError
 }
 
+function isAbortError(error: unknown) {
+  return error instanceof DOMException && error.name === 'AbortError'
+}
+
 export const useSignalingStore = defineStore('signaling', () => {
   const peer = shallowRef<Peer | null>(null)
   const hostConnection = shallowRef<DataConnection | null>(null)
@@ -201,15 +300,44 @@ export const useSignalingStore = defineStore('signaling', () => {
   const isHistoryLoading = ref(false)
   const pendingHistoryTransferIds = ref<string[]>([])
   const hasReceivedHistorySnapshot = ref(false)
+  const backendRoomEventCursor = ref(0)
+  const backendRoomEventPollController = shallowRef<AbortController | null>(null)
 
   const sessionStore = useSessionStore()
   const roomStore = useRoomStore()
   const notificationStore = useNotificationStore()
   const networkActivityStore = useNetworkActivityStore()
+  const backendRelayClient = createBackendRelayClient()
 
   const isReady = computed(
     () => state.value === 'listening' || state.value === 'connected'
   )
+  const isBackendRelayConfigured = computed(() => backendRelayClient.isConfigured)
+  // eslint-disable-next-line no-useless-assignment
+  const backendRoomRelayKey = computed(() => {
+    const roomId = activeRoomId.value ?? roomStore.room?.id
+    const localPeerId = sessionStore.peer?.id
+
+    if (
+      !roomStore.preferBackendRelay ||
+      !backendRelayClient.isConfigured ||
+      !roomId ||
+      !localPeerId ||
+      !mode.value
+    ) {
+      return null
+    }
+
+    if (mode.value === 'host') {
+      return state.value === 'listening' || state.value === 'connected'
+        ? `${mode.value}:${roomId}:${localPeerId}`
+        : null
+    }
+
+    return state.value === 'connected'
+      ? `${mode.value}:${roomId}:${localPeerId}`
+      : null
+  })
 
   let retryTimer: ReturnType<typeof setTimeout> | null = null
   let listenersBound = false
@@ -218,8 +346,13 @@ export const useSignalingStore = defineStore('signaling', () => {
   const outgoingTransferFiles = new Map<string, File[]>()
   const outgoingTransferModes = new Map<string, OutgoingTransferMode>()
   const outgoingTransferTargets = new Map<string, string | null>()
+  const outgoingRelayTransfers = new Map<string, OutgoingRelayTransferSession>()
   const cancelledOutgoingTransfers = new Set<string>()
+  const pendingDirectOfferAcks = new Map<string, PendingDirectOfferAck>()
+  const pendingRelayChunkAcks = new Map<string, PendingRelayChunkAck>()
+  const incomingRelayTransfers = new Map<string, IncomingRelayTransferSession>()
   const incomingTransferActivityTokens = new Map<string, number>()
+  const transferSpeedSamples = new Map<string, TransferSpeedSample>()
   let outgoingReplayChain = Promise.resolve()
   let peerBootstrapActivityToken: number | null = null
   let joinConnectionActivityToken: number | null = null
@@ -227,6 +360,14 @@ export const useSignalingStore = defineStore('signaling', () => {
   function setState(nextState: SignalingState, nextError?: string | null) {
     state.value = nextState
     errorMessage.value = nextError ?? null
+
+    if (
+      (nextState === 'connected' || nextState === 'listening') &&
+      roomStore.preferBackendRelay &&
+      backendRelayClient.isConfigured
+    ) {
+      void startBackendRoomEventPolling()
+    }
   }
 
   function bindWindowListeners() {
@@ -292,6 +433,110 @@ export const useSignalingStore = defineStore('signaling', () => {
     )
   }
 
+  async function publishBackendRoomEvent(
+    message: SignalingMessage,
+    targetPeerIdOverride?: string | null
+  ) {
+    const roomId = activeRoomId.value ?? roomStore.room?.id
+    const localPeerId = sessionStore.peer?.id
+    const targetPeerId =
+      targetPeerIdOverride ??
+      ('targetPeerId' in message && typeof message.targetPeerId === 'string'
+        ? message.targetPeerId
+        : null)
+
+    if (!roomId || !localPeerId || !backendRelayClient.isConfigured) {
+      throw new Error('Backend relay is not configured for this room.')
+    }
+
+    await backendRelayClient.publishRoomEvent({
+      message: message as unknown as {
+        type: string
+      } & Record<string, unknown>,
+      roomId,
+      senderPeerId: localPeerId,
+      targetPeerId,
+    })
+  }
+
+  function handleBackendRoomEventMessage(message: unknown) {
+    if (!isSignalingMessage(message)) {
+      return
+    }
+
+    handleJoinMessage(message)
+  }
+
+  function stopBackendRoomEventPolling() {
+    backendRoomEventPollController.value?.abort()
+    backendRoomEventPollController.value = null
+    backendRoomEventCursor.value = 0
+  }
+
+  async function startBackendRoomEventPolling() {
+    const roomId = activeRoomId.value ?? roomStore.room?.id
+    const localPeerId = sessionStore.peer?.id
+
+    if (
+      backendRoomEventPollController.value ||
+      !backendRelayClient.isConfigured ||
+      !roomStore.preferBackendRelay ||
+      !roomId ||
+      !localPeerId
+    ) {
+      return
+    }
+
+    const controller = new AbortController()
+
+    backendRoomEventPollController.value = controller
+
+    try {
+      while (!controller.signal.aborted) {
+        const events = await pollBackendRelay({
+          intervalMs: 1000,
+          poll: async () => {
+            const response = await backendRelayClient.pollRoomEvents({
+              afterEventId: backendRoomEventCursor.value,
+              peerId: localPeerId,
+              roomId,
+              signal: controller.signal,
+            })
+
+            backendRoomEventCursor.value = response.latestEventId
+
+            return response.events.length > 0 ? response.events : null
+          },
+          signal: controller.signal,
+        })
+
+        for (const event of events) {
+          handleBackendRoomEventMessage(event.message)
+        }
+      }
+    } catch (error) {
+      if (
+        backendRoomEventPollController.value !== controller ||
+        isAbortError(error)
+      ) {
+        return
+      }
+
+      notificationStore.pushNotification({
+        title: 'Backend relay room sync failed',
+        detail:
+          error instanceof Error
+            ? error.message
+            : 'Backend relay room polling failed unexpectedly.',
+        tone: 'warning',
+      })
+    } finally {
+      if (backendRoomEventPollController.value === controller) {
+        backendRoomEventPollController.value = null
+      }
+    }
+  }
+
   function startIncomingTransferActivity(transferId: string) {
     if (incomingTransferActivityTokens.has(transferId)) {
       return
@@ -327,9 +572,83 @@ export const useSignalingStore = defineStore('signaling', () => {
   }
 
   function finishOutgoingTransfer(transferId: string) {
+    clearPendingDirectOfferAck(transferId)
+    clearPendingRelayChunkAcksForTransfer(transferId)
+    clearTransferSpeedSample(transferId)
     outgoingTransferModes.delete(transferId)
     outgoingTransferTargets.delete(transferId)
+    outgoingRelayTransfers.delete(transferId)
     cancelledOutgoingTransfers.delete(transferId)
+  }
+
+  function clearTransferSpeedSample(transferId: string) {
+    transferSpeedSamples.delete(transferId)
+  }
+
+  function clearAllTransferSpeedSamples() {
+    transferSpeedSamples.clear()
+  }
+
+  function primeTransferSpeedSample(transferId: string) {
+    transferSpeedSamples.set(transferId, {
+      bytes: 0,
+      updatedAt: performance.now(),
+    })
+  }
+
+  function measureTransferSpeed(
+    transferId: string,
+    transferredBytes: number
+  ) {
+    const now = performance.now()
+    const previousSample = transferSpeedSamples.get(transferId)
+
+    if (!previousSample) {
+      transferSpeedSamples.set(transferId, {
+        bytes: transferredBytes,
+        updatedAt: now,
+      })
+
+      return undefined
+    }
+
+    const byteDelta = transferredBytes - previousSample.bytes
+    const timeDeltaMs = now - previousSample.updatedAt
+
+    if (byteDelta <= 0 || timeDeltaMs < minTransferSpeedSampleWindowMs) {
+      return previousSample.bytesPerSecond
+    }
+
+    const instantaneousBytesPerSecond = byteDelta / (timeDeltaMs / 1000)
+    const bytesPerSecond =
+      previousSample.bytesPerSecond === undefined
+        ? instantaneousBytesPerSecond
+        : previousSample.bytesPerSecond * 0.35 +
+          instantaneousBytesPerSecond * 0.65
+
+    transferSpeedSamples.set(transferId, {
+      bytes: transferredBytes,
+      bytesPerSecond,
+      updatedAt: now,
+    })
+
+    return bytesPerSecond
+  }
+
+  function updateTransferProgressForBytes(
+    transferId: string,
+    transferredBytes: number,
+    totalBytes: number
+  ) {
+    const progress =
+      (transferredBytes / Math.max(totalBytes, transferredBytes, 1)) * 100
+
+    roomStore.updateTransferProgress(
+      transferId,
+      progress,
+      'transferring',
+      measureTransferSpeed(transferId, transferredBytes)
+    )
   }
 
   function syncCancelledOutgoingTransfer(
@@ -351,14 +670,189 @@ export const useSignalingStore = defineStore('signaling', () => {
     }
   }
 
+  function buildRelayChunkAckKey(
+    transferId: string,
+    fileId: string,
+    chunkIndex: number
+  ) {
+    return `${transferId}:${fileId}:${chunkIndex}`
+  }
+
+  function clearPendingDirectOfferAck(transferId: string) {
+    const pendingAck = pendingDirectOfferAcks.get(transferId)
+
+    if (!pendingAck) {
+      return
+    }
+
+    window.clearTimeout(pendingAck.timeoutId)
+    pendingDirectOfferAcks.delete(transferId)
+  }
+
+  function clearPendingRelayChunkAcksForTransfer(transferId: string) {
+    const prefix = `${transferId}:`
+
+    for (const [key, pendingAck] of pendingRelayChunkAcks.entries()) {
+      if (!key.startsWith(prefix)) {
+        continue
+      }
+
+      window.clearTimeout(pendingAck.timeoutId)
+      pendingRelayChunkAcks.delete(key)
+    }
+  }
+
+  function rejectPendingDirectOfferAck(transferId: string, error: Error) {
+    const pendingAck = pendingDirectOfferAcks.get(transferId)
+
+    if (!pendingAck) {
+      return
+    }
+
+    clearPendingDirectOfferAck(transferId)
+    pendingAck.reject(error)
+  }
+
+  function rejectPendingRelayChunkAcksForTransfer(
+    transferId: string,
+    error: Error
+  ) {
+    const prefix = `${transferId}:`
+
+    for (const [key, pendingAck] of pendingRelayChunkAcks.entries()) {
+      if (!key.startsWith(prefix)) {
+        continue
+      }
+
+      window.clearTimeout(pendingAck.timeoutId)
+      pendingRelayChunkAcks.delete(key)
+      pendingAck.reject(error)
+    }
+  }
+
+  function resolveConnectedRecipientPeerIds(localPeerId: string) {
+    return roomStore.members
+      .filter(
+        (member) =>
+          member.id !== localPeerId && member.connectionState === 'connected'
+      )
+      .map((member) => member.id)
+  }
+
+  function resolveBackendRelayRecipientPeerId(localPeerId: string) {
+    if (!backendRelayClient.isConfigured) {
+      return null
+    }
+
+    const recipientPeerIds = resolveConnectedRecipientPeerIds(localPeerId)
+
+    return recipientPeerIds.length === 1 ? recipientPeerIds[0] ?? null : null
+  }
+
+  function getBackendRelayAvailabilityError(localPeerId: string) {
+    if (!backendRelayClient.isConfigured) {
+      return 'Backend relay is not configured for this deployment.'
+    }
+
+    const recipientPeerIds = resolveConnectedRecipientPeerIds(localPeerId)
+
+    if (recipientPeerIds.length !== 1) {
+      return 'Backend relay mode currently supports exactly one connected recipient.'
+    }
+
+    return null
+  }
+
+  function waitForDirectOfferAck(transferId: string, recipientPeerId: string) {
+    clearPendingDirectOfferAck(transferId)
+
+    return new Promise<void>((resolve, reject) => {
+      const timeoutId = window.setTimeout(() => {
+        pendingDirectOfferAcks.delete(transferId)
+        reject(
+          new Error(
+            'Direct WebRTC transfer did not become ready before fallback timeout.'
+          )
+        )
+      }, relayOfferAckTimeoutMs)
+
+      pendingDirectOfferAcks.set(transferId, {
+        recipientPeerId,
+        resolve: () => {
+          window.clearTimeout(timeoutId)
+          pendingDirectOfferAcks.delete(transferId)
+          resolve()
+        },
+        reject: (error) => {
+          window.clearTimeout(timeoutId)
+          pendingDirectOfferAcks.delete(transferId)
+          reject(error)
+        },
+        timeoutId,
+      })
+    })
+  }
+
+  function waitForRelayChunkAck(
+    transferId: string,
+    fileId: string,
+    chunkIndex: number
+  ) {
+    const ackKey = buildRelayChunkAckKey(transferId, fileId, chunkIndex)
+    const existingAck = pendingRelayChunkAcks.get(ackKey)
+
+    if (existingAck) {
+      window.clearTimeout(existingAck.timeoutId)
+      pendingRelayChunkAcks.delete(ackKey)
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      const timeoutId = window.setTimeout(() => {
+        pendingRelayChunkAcks.delete(ackKey)
+        reject(
+          new Error(
+            `Backend relay did not receive acknowledgment for chunk ${chunkIndex}.`
+          )
+        )
+      }, relayChunkAckTimeoutMs)
+
+      pendingRelayChunkAcks.set(ackKey, {
+        resolve: () => {
+          window.clearTimeout(timeoutId)
+          pendingRelayChunkAcks.delete(ackKey)
+          resolve()
+        },
+        reject: (error) => {
+          window.clearTimeout(timeoutId)
+          pendingRelayChunkAcks.delete(ackKey)
+          reject(error)
+        },
+        timeoutId,
+      })
+    })
+  }
+
   function handleOutgoingTransferCancelled(message: TransferCancelMessage) {
     cancelledOutgoingTransfers.add(message.transferId)
+    rejectPendingDirectOfferAck(
+      message.transferId,
+      new TransferCancelledError(message.transferId)
+    )
+    rejectPendingRelayChunkAcksForTransfer(
+      message.transferId,
+      new TransferCancelledError(message.transferId)
+    )
 
     const mode = outgoingTransferModes.get(message.transferId)
 
     if (!mode) {
       return
     }
+
+    void cancelOutgoingRelayTransferSession(
+      message.transferId,
+      'The recipient cancelled the backend relay transfer.'
+    )
 
     syncCancelledOutgoingTransfer(message.transferId, mode)
 
@@ -368,6 +862,11 @@ export const useSignalingStore = defineStore('signaling', () => {
   }
 
   async function disposeIncomingTransfer(transfer: IncomingTransferBuffer) {
+    const relayTransfer = incomingRelayTransfers.get(transfer.transferId)
+
+    relayTransfer?.pollController.abort()
+    incomingRelayTransfers.delete(transfer.transferId)
+
     await Promise.all(
       Array.from(transfer.files.values(), async (fileBuffer) => {
         try {
@@ -389,6 +888,7 @@ export const useSignalingStore = defineStore('signaling', () => {
       }
 
       transfer.failed = true
+      clearTransferSpeedSample(transferId)
       incomingTransfers.delete(transferId)
       finishIncomingTransferActivity(transferId)
       void disposeIncomingTransfer(transfer)
@@ -399,15 +899,22 @@ export const useSignalingStore = defineStore('signaling', () => {
     const transfers = Array.from(incomingTransfers.values())
 
     incomingTransfers.clear()
+    for (const relayTransfer of incomingRelayTransfers.values()) {
+      relayTransfer.pollController.abort()
+    }
+    incomingRelayTransfers.clear()
     finishAllIncomingTransferActivity()
 
     for (const transfer of transfers) {
       transfer.failed = true
+      clearTransferSpeedSample(transfer.transferId)
       void disposeIncomingTransfer(transfer)
     }
   }
 
   function resetConnections() {
+    stopBackendRoomEventPolling()
+    clearAllTransferSpeedSamples()
     hostConnection.value?.close()
     hostConnection.value = null
 
@@ -423,9 +930,27 @@ export const useSignalingStore = defineStore('signaling', () => {
   }
 
   function clearOutgoingTransferCache() {
+    for (const transferId of pendingDirectOfferAcks.keys()) {
+      rejectPendingDirectOfferAck(
+        transferId,
+        new Error('The room session was reset before the transfer could start.')
+      )
+    }
+
+    for (const transferId of outgoingRelayTransfers.keys()) {
+      rejectPendingRelayChunkAcksForTransfer(
+        transferId,
+        new Error('The room session was reset during backend relay transfer.')
+      )
+    }
+
     outgoingTransferFiles.clear()
     outgoingTransferModes.clear()
+    outgoingRelayTransfers.clear()
     cancelledOutgoingTransfers.clear()
+    pendingDirectOfferAcks.clear()
+    pendingRelayChunkAcks.clear()
+    clearAllTransferSpeedSamples()
     outgoingReplayChain = Promise.resolve()
   }
 
@@ -689,6 +1214,7 @@ export const useSignalingStore = defineStore('signaling', () => {
       activePeer.connect(hostPeerId.value, {
         reliable: true,
         metadata: {
+          preferBackendRelay: roomStore.preferBackendRelay,
           roomId: room.id,
           peerId: localPeer.id,
           label: localPeer.label,
@@ -718,6 +1244,7 @@ export const useSignalingStore = defineStore('signaling', () => {
       setState('connected')
       connection.send({
         type: 'member-hello',
+        preferBackendRelay: roomStore.preferBackendRelay,
         roomId: room.id,
         peer: {
           id: localPeer.id,
@@ -766,6 +1293,7 @@ export const useSignalingStore = defineStore('signaling', () => {
     }
 
     if (message.type === 'host-welcome' || message.type === 'room-sync') {
+      roomStore.setPreferBackendRelay(message.preferBackendRelay)
       roomStore.replaceMembers(message.members)
       roomStore.replacePresenceEvents(message.presenceEvents)
 
@@ -802,6 +1330,24 @@ export const useSignalingStore = defineStore('signaling', () => {
     if (message.type === 'replay-transfer-unavailable') {
       roomStore.failTransfer(message.transferId, message.reason)
       settleHistoryTransfer(message.transferId)
+
+      return
+    }
+
+    if (message.type === 'file-offer-ack') {
+      handleDirectTransferReadyAck(message)
+
+      return
+    }
+
+    if (message.type === 'relay-transfer-offer') {
+      handleIncomingRelayTransferOffer(message)
+
+      return
+    }
+
+    if (message.type === 'relay-chunk-ack') {
+      handleIncomingRelayChunkAck(message)
 
       return
     }
@@ -961,6 +1507,53 @@ export const useSignalingStore = defineStore('signaling', () => {
       return false
     }
 
+    if (roomStore.preferBackendRelay) {
+      if (!backendRelayClient.isConfigured) {
+        roomStore.markMessageStatus(draftResult.message.id, 'failed')
+        notificationStore.pushNotification({
+          title: 'Backend relay unavailable',
+          detail: 'Configure the backend relay before sending chat in relay mode.',
+          tone: 'warning',
+        })
+
+        return false
+      }
+
+      pulseNetworkActivity()
+      void publishBackendRoomEvent({
+        type: 'chat-broadcast',
+        roomId: room.id,
+        message: {
+          ...draftResult.message,
+          status: 'sent',
+        },
+      } satisfies ChatBroadcastMessage)
+        .then(() => {
+          console.info('Backend relay chat sent.', {
+            messageId: draftResult.message!.id,
+            roomId: room.id,
+            senderPeerId: localPeer.id,
+          })
+          roomStore.markMessageStatus(draftResult.message!.id, 'sent', {
+            ...draftResult.message!,
+            status: 'sent',
+          })
+        })
+        .catch((error) => {
+          roomStore.markMessageStatus(draftResult.message!.id, 'failed')
+          notificationStore.pushNotification({
+            title: 'Message not sent',
+            detail:
+              error instanceof Error
+                ? error.message
+                : 'Backend relay chat send failed unexpectedly.',
+            tone: 'warning',
+          })
+        })
+
+      return true
+    }
+
     if (room.localMode === 'host') {
       relayHostMessage(draftResult.message)
 
@@ -1010,6 +1603,11 @@ export const useSignalingStore = defineStore('signaling', () => {
     const files = transferResult.files
 
     outgoingTransferFiles.set(transfer.id, [...files])
+    roomStore.setTransferTransport(transfer.id, 'webrtc')
+
+    const relayRecipientPeerId = resolveBackendRelayRecipientPeerId(
+      localPeer.id
+    )
 
     const recipientCount = roomStore.members.filter(
       (member) =>
@@ -1042,8 +1640,25 @@ export const useSignalingStore = defineStore('signaling', () => {
       return false
     }
 
-    startOutgoingTransfer(transfer.id, 'live')
+    startOutgoingTransfer(transfer.id, 'live', relayRecipientPeerId)
+    primeTransferSpeedSample(transfer.id)
     roomStore.updateTransferProgress(transfer.id, 0)
+
+    if (roomStore.preferBackendRelay) {
+      const backendRelayAvailabilityError =
+        getBackendRelayAvailabilityError(localPeer.id)
+
+      if (backendRelayAvailabilityError) {
+        roomStore.failTransfer(transfer.id, backendRelayAvailabilityError)
+        notificationStore.pushNotification({
+          title: 'Backend relay unavailable',
+          detail: backendRelayAvailabilityError,
+          tone: 'warning',
+        })
+
+        return false
+      }
+    }
 
     const offer: FileOfferMessage = {
       type: 'file-offer',
@@ -1060,64 +1675,53 @@ export const useSignalingStore = defineStore('signaling', () => {
 
     return networkActivityStore
       .track(async () => {
-        if (room.localMode === 'host') {
-          throwIfOutgoingTransferCancelled(transfer.id)
-          broadcastToMembers(offer)
-          await streamTransferFiles(
-            transfer,
+        if (roomStore.preferBackendRelay) {
+          return sendFilesOverBackendRelay({
+            activation: 'preferred',
             files,
-            (message) => {
-              broadcastToMembers(message)
-            },
-            true
-          )
-          throwIfOutgoingTransferCancelled(transfer.id)
-          broadcastToMembers({
-            type: 'file-complete',
-            roomId: room.id,
-            transferId: transfer.id,
-          } satisfies FileCompleteMessage)
-          roomStore.completeTransfer(transfer.id)
-
-          return true
+            recipientPeerId: relayRecipientPeerId!,
+            room,
+            transfer,
+          })
         }
 
-        if (!hostConnection.value?.open) {
-          roomStore.failTransfer(
-            transfer.id,
-            'Reconnect to the host before sharing files.'
-          )
+        const directOfferAck = relayRecipientPeerId
+          ? waitForDirectOfferAck(transfer.id, relayRecipientPeerId)
+          : null
 
-          return false
-        }
+        await sendTransferOfferOverWebRtc({
+          offer,
+          room,
+          transferId: transfer.id,
+        })
 
-        const connection = hostConnection.value
+        if (directOfferAck) {
+          try {
+            await directOfferAck
+          } catch {
+            const recipientPeerId = relayRecipientPeerId
 
-        throwIfOutgoingTransferCancelled(transfer.id)
-        connection.send(offer)
-        await streamTransferFiles(
-          transfer,
-          files,
-          (message) => {
-            if (!connection.open) {
+            if (!recipientPeerId) {
               throw new Error(
-                'The host connection closed before the upload finished.'
+                'Backend relay fallback was requested without a single connected recipient.'
               )
             }
 
-            connection.send(message)
-          },
-          true
-        )
-        throwIfOutgoingTransferCancelled(transfer.id)
-        connection.send({
-          type: 'file-complete',
-          roomId: room.id,
-          transferId: transfer.id,
-        } satisfies FileCompleteMessage)
-        roomStore.completeTransfer(transfer.id)
+            return sendFilesOverBackendRelay({
+              activation: 'fallback',
+              files,
+              recipientPeerId,
+              room,
+              transfer,
+            })
+          }
+        }
 
-        return true
+        return finishWebRtcTransferAfterOffer({
+          files,
+          room,
+          transfer,
+        })
       })
       .catch((error) => {
         if (isTransferCancelledError(error)) {
@@ -1143,6 +1747,283 @@ export const useSignalingStore = defineStore('signaling', () => {
       .finally(() => {
         finishOutgoingTransfer(transfer.id)
       })
+  }
+
+  async function sendTransferOfferOverWebRtc({
+    offer,
+    room,
+    transferId,
+  }: {
+    offer: FileOfferMessage
+    room: NonNullable<typeof roomStore.room>
+    transferId: string
+  }) {
+    if (room.localMode === 'host') {
+      throwIfOutgoingTransferCancelled(transferId)
+      broadcastToMembers(offer)
+
+      return
+    }
+
+    if (!hostConnection.value?.open) {
+      throw new Error('Reconnect to the host before sharing files.')
+    }
+
+    const connection = hostConnection.value
+
+    throwIfOutgoingTransferCancelled(transferId)
+    connection.send(offer)
+  }
+
+  async function finishWebRtcTransferAfterOffer({
+    files,
+    room,
+    transfer,
+  }: {
+    files: File[]
+    room: NonNullable<typeof roomStore.room>
+    transfer: FileTransfer
+  }) {
+    if (room.localMode === 'host') {
+      throwIfOutgoingTransferCancelled(transfer.id)
+      await streamTransferFiles(
+        transfer,
+        files,
+        (message) => {
+          broadcastToMembers(message)
+        },
+        true
+      )
+      throwIfOutgoingTransferCancelled(transfer.id)
+      broadcastToMembers({
+        type: 'file-complete',
+        roomId: room.id,
+        transferId: transfer.id,
+      } satisfies FileCompleteMessage)
+      roomStore.completeTransfer(transfer.id)
+
+      return true
+    }
+
+    if (!hostConnection.value?.open) {
+      throw new Error('Reconnect to the host before sharing files.')
+    }
+
+    const connection = hostConnection.value
+
+    throwIfOutgoingTransferCancelled(transfer.id)
+    await streamTransferFiles(
+      transfer,
+      files,
+      (message) => {
+        if (!connection.open) {
+          throw new Error(
+            'The host connection closed before the upload finished.'
+          )
+        }
+
+        connection.send(message)
+      },
+      true
+    )
+    throwIfOutgoingTransferCancelled(transfer.id)
+    connection.send({
+      type: 'file-complete',
+      roomId: room.id,
+      transferId: transfer.id,
+    } satisfies FileCompleteMessage)
+    roomStore.completeTransfer(transfer.id)
+
+    return true
+  }
+
+  async function sendFilesOverBackendRelay({
+    activation,
+    files,
+    recipientPeerId,
+    room,
+    transfer,
+  }: {
+    activation: 'preferred' | 'fallback'
+    files: File[]
+    recipientPeerId: string
+    room: NonNullable<typeof roomStore.room>
+    transfer: FileTransfer
+  }) {
+    const localPeer = sessionStore.peer
+
+    if (!localPeer || !backendRelayClient.isConfigured) {
+      throw new Error('Backend relay is not configured for this deployment.')
+    }
+
+    const relayTransfer = await backendRelayClient.createTransfer({
+      files: transfer.files.map((file) => ({
+        id: file.id,
+        name: file.name,
+        size: file.size,
+        type: file.mimeType,
+      })),
+      recipientPeerId,
+      roomId: room.id,
+      senderPeerId: localPeer.id,
+      totalBytes: transfer.totalBytes ?? 0,
+    })
+
+    if (relayTransfer.maxChunkBytes < transferChunkBytes) {
+      throw new Error(
+        `Backend relay only accepts ${relayTransfer.maxChunkBytes} byte chunks, which is below the frontend transfer chunk size.`
+      )
+    }
+
+    outgoingRelayTransfers.set(transfer.id, {
+      expiresAt: relayTransfer.expiresAt,
+      maxChunkBytes: relayTransfer.maxChunkBytes,
+      recipientPeerId,
+      relayTransferId: relayTransfer.transferId,
+      sessionId: relayTransfer.sessionId,
+    })
+    roomStore.setTransferTransport(transfer.id, 'backend-relay')
+    notificationStore.pushNotification({
+      title:
+        activation === 'preferred'
+          ? 'Backend relay selected'
+          : 'Backend relay active',
+      detail:
+        activation === 'preferred'
+          ? 'This transfer is using the backend relay immediately.'
+          : 'Direct WebRTC transfer did not become ready in time. This transfer is using the backend relay instead.',
+      tone: 'info',
+    })
+
+    const relayOffer = {
+      type: 'relay-transfer-offer',
+      roomId: room.id,
+      transferId: transfer.id,
+      sender: {
+        id: localPeer.id,
+        label: localPeer.label,
+      },
+      files: transfer.files,
+      totalBytes: transfer.totalBytes ?? 0,
+      createdAt: transfer.createdAt,
+      relay: {
+        expiresAt: relayTransfer.expiresAt,
+        maxChunkBytes: relayTransfer.maxChunkBytes,
+        pollIntervalMs: relayTransfer.pollIntervalMs,
+        sessionId: relayTransfer.sessionId,
+        transferId: relayTransfer.transferId,
+      },
+      targetPeerId: recipientPeerId,
+    } satisfies RelayTransferOfferMessage
+
+    try {
+      if (roomStore.preferBackendRelay) {
+        await publishBackendRoomEvent(relayOffer)
+      } else if (room.localMode === 'host') {
+        if (!sendToMember(recipientPeerId, relayOffer)) {
+          throw new Error('The relay recipient is no longer connected.')
+        }
+      } else if (hostConnection.value?.open) {
+        hostConnection.value.send(relayOffer)
+      } else {
+        throw new Error(
+          'Reconnect to the host before switching this transfer to backend relay.'
+        )
+      }
+
+      let acknowledgedBytes = 0
+      let relayChunkIndex = 0
+
+      for (let fileIndex = 0; fileIndex < files.length; fileIndex += 1) {
+        throwIfOutgoingTransferCancelled(transfer.id)
+
+        const file = files[fileIndex]
+        const fileMeta = transfer.files[fileIndex]
+
+        if (!file || !fileMeta) {
+          continue
+        }
+
+        await readFileInChunks(file, async (chunk, _chunkIndex, totalChunks) => {
+          const currentChunkIndex = relayChunkIndex
+
+          relayChunkIndex += 1
+          throwIfOutgoingTransferCancelled(transfer.id)
+
+          await backendRelayClient.uploadChunk({
+            chunkIndex: currentChunkIndex,
+            data: chunk,
+            fileId: fileMeta.id,
+            senderPeerId: localPeer.id,
+            sessionId: relayTransfer.sessionId,
+            totalChunks,
+            transferId: relayTransfer.transferId,
+          })
+
+          await waitForRelayChunkAck(
+            transfer.id,
+            fileMeta.id,
+            currentChunkIndex
+          )
+
+          acknowledgedBytes += chunk.byteLength
+          updateTransferProgressForBytes(
+            transfer.id,
+            acknowledgedBytes,
+            transfer.totalBytes ?? acknowledgedBytes
+          )
+        })
+      }
+
+      throwIfOutgoingTransferCancelled(transfer.id)
+      await backendRelayClient.completeTransfer({
+        peerId: localPeer.id,
+        sessionId: relayTransfer.sessionId,
+        transferId: relayTransfer.transferId,
+      })
+      roomStore.completeTransfer(transfer.id)
+
+      return true
+    } catch (error) {
+      await cancelOutgoingRelayTransferSession(
+        transfer.id,
+        error instanceof Error
+          ? error.message
+          : 'Backend relay upload failed unexpectedly.'
+      )
+
+      if (!isTransferCancelledError(error)) {
+        notifyRecipientsTransferCancelled(transfer.id)
+      }
+
+      throw error
+    }
+  }
+
+  async function cancelOutgoingRelayTransferSession(
+    transferId: string,
+    reason: string
+  ) {
+    const relayTransfer = outgoingRelayTransfers.get(transferId)
+    const localPeerId = sessionStore.peer?.id
+
+    if (!relayTransfer || !localPeerId) {
+      return
+    }
+
+    rejectPendingRelayChunkAcksForTransfer(transferId, new Error(reason))
+    outgoingRelayTransfers.delete(transferId)
+
+    try {
+      await backendRelayClient.cancelTransfer({
+        peerId: localPeerId,
+        reason,
+        sessionId: relayTransfer.sessionId,
+        transferId: relayTransfer.relayTransferId,
+      })
+    } catch (error) {
+      void error
+    }
   }
 
   function broadcastToMembers(
@@ -1210,6 +2091,12 @@ export const useSignalingStore = defineStore('signaling', () => {
       reason,
     } satisfies ReplayTransferUnavailableMessage
 
+    if (roomStore.preferBackendRelay && backendRelayClient.isConfigured) {
+      void publishBackendRoomEvent(unavailableMessage, recipientPeerId)
+
+      return
+    }
+
     if (roomStore.room?.localMode === 'host') {
       sendToMember(recipientPeerId, unavailableMessage)
 
@@ -1235,6 +2122,12 @@ export const useSignalingStore = defineStore('signaling', () => {
       transferId: transfer.id,
       targetPeerId: transfer.senderId,
     } satisfies TransferCancelMessage
+
+    if (roomStore.preferBackendRelay && backendRelayClient.isConfigured) {
+      void publishBackendRoomEvent(cancelMessage)
+
+      return
+    }
 
     if (roomStore.room?.localMode === 'host') {
       if (cancelMessage.targetPeerId === localPeerId) {
@@ -1268,6 +2161,12 @@ export const useSignalingStore = defineStore('signaling', () => {
       ...(targetPeerId ? { targetPeerId } : {}),
     } satisfies TransferCancelMessage
 
+    if (roomStore.preferBackendRelay && backendRelayClient.isConfigured) {
+      void publishBackendRoomEvent(cancelMessage)
+
+      return
+    }
+
     if (roomStore.room?.localMode === 'host') {
       if (targetPeerId) {
         sendToMember(targetPeerId, cancelMessage)
@@ -1296,6 +2195,7 @@ export const useSignalingStore = defineStore('signaling', () => {
     if (transfer) {
       transfer.failed = true
       incomingTransfers.delete(transferId)
+      clearTransferSpeedSample(transferId)
       roomStore.cancelTransfer(transferId)
       settleHistoryTransfer(transferId)
       finishIncomingTransferActivity(transferId)
@@ -1312,6 +2212,7 @@ export const useSignalingStore = defineStore('signaling', () => {
       return null
     }
 
+    clearTransferSpeedSample(transferId)
     roomStore.cancelTransfer(transferId)
     settleHistoryTransfer(transferId)
 
@@ -1372,6 +2273,7 @@ export const useSignalingStore = defineStore('signaling', () => {
     broadcastToMembers(
       {
         type: 'room-sync',
+        preferBackendRelay: roomStore.preferBackendRelay,
         roomId: room.id,
         members: roomStore.members,
         presenceEvents: roomStore.presenceEvents,
@@ -1413,6 +2315,8 @@ export const useSignalingStore = defineStore('signaling', () => {
       typeof connection.metadata?.peerId === 'string'
         ? connection.metadata.peerId
         : connection.peer
+    const preferredRelay =
+      connection.metadata?.preferBackendRelay === true
 
     let didDisconnect = false
     let didActivate = false
@@ -1427,6 +2331,9 @@ export const useSignalingStore = defineStore('signaling', () => {
       }
 
       didActivate = true
+      if (preferredRelay && !roomStore.preferBackendRelay) {
+        roomStore.setPreferBackendRelay(true)
+      }
       const duplicateConnection = memberConnections.value[connection.peer]
 
       if (duplicateConnection && duplicateConnection !== connection) {
@@ -1467,6 +2374,7 @@ export const useSignalingStore = defineStore('signaling', () => {
       connection.send({
         type: 'host-welcome',
         roomId: activeRoomId.value!,
+        preferBackendRelay: roomStore.preferBackendRelay,
         host: {
           id: sessionStore.peer!.id,
           label: sessionStore.peer!.label,
@@ -1498,6 +2406,9 @@ export const useSignalingStore = defineStore('signaling', () => {
       }
 
       if (message.type === 'member-hello') {
+        if (message.preferBackendRelay && !roomStore.preferBackendRelay) {
+          roomStore.setPreferBackendRelay(true)
+        }
         activateMemberConnection(
           message.peer.id,
           message.peer.label,
@@ -1515,6 +2426,15 @@ export const useSignalingStore = defineStore('signaling', () => {
         return
       }
 
+      if (message.type === 'relay-preference') {
+        if (message.preferBackendRelay && !roomStore.preferBackendRelay) {
+          roomStore.setPreferBackendRelay(true)
+          broadcastRoomSync()
+        }
+
+        return
+      }
+
       if (message.type === 'chat-send') {
         handleIncomingChatFromMember(connection, peerId, label, message)
 
@@ -1523,6 +2443,36 @@ export const useSignalingStore = defineStore('signaling', () => {
 
       if (message.type === 'replay-transfer') {
         handleReplayTransferRequest(message)
+
+        return
+      }
+
+      if (message.type === 'file-offer-ack') {
+        if (message.targetPeerId === sessionStore.peer?.id) {
+          handleDirectTransferReadyAck(message)
+        } else {
+          sendToMember(message.targetPeerId, message)
+        }
+
+        return
+      }
+
+      if (message.type === 'relay-transfer-offer') {
+        if (message.targetPeerId === sessionStore.peer?.id) {
+          handleIncomingRelayTransferOffer(message)
+        } else {
+          sendToMember(message.targetPeerId, message)
+        }
+
+        return
+      }
+
+      if (message.type === 'relay-chunk-ack') {
+        if (message.targetPeerId === sessionStore.peer?.id) {
+          handleIncomingRelayChunkAck(message)
+        } else {
+          sendToMember(message.targetPeerId, message)
+        }
 
         return
       }
@@ -1664,6 +2614,7 @@ export const useSignalingStore = defineStore('signaling', () => {
     retryCount,
     isReady,
     isHistoryLoading,
+    isBackendRelayConfigured,
     ensureHost,
     ensureJoiner,
     retryJoinConnection,
@@ -1754,23 +2705,25 @@ export const useSignalingStore = defineStore('signaling', () => {
     })
   }
 
-  function registerIncomingTransfer(message: FileOfferMessage) {
-    if (cancelledIncomingTransfers.has(message.transferId)) {
-      return
+  function ensureIncomingTransfer(
+    input: Pick<FileOfferMessage, 'transferId' | 'sender' | 'files' | 'totalBytes' | 'createdAt'>
+  ) {
+    if (cancelledIncomingTransfers.has(input.transferId)) {
+      return false
     }
 
-    if (incomingTransfers.has(message.transferId)) {
-      return
+    if (incomingTransfers.has(input.transferId)) {
+      return true
     }
 
-    startIncomingTransferActivity(message.transferId)
-    incomingTransfers.set(message.transferId, {
-      transferId: message.transferId,
-      senderId: message.sender.id,
-      senderLabel: message.sender.label,
-      totalBytes: message.totalBytes,
+    startIncomingTransferActivity(input.transferId)
+    incomingTransfers.set(input.transferId, {
+      transferId: input.transferId,
+      senderId: input.sender.id,
+      senderLabel: input.sender.label,
+      totalBytes: input.totalBytes,
       files: new Map(
-        message.files.map((file) => [
+        input.files.map((file) => [
           file.id,
           {
             meta: file,
@@ -1786,13 +2739,37 @@ export const useSignalingStore = defineStore('signaling', () => {
       failed: false,
     })
     roomStore.createIncomingTransfer(
-      message.transferId,
-      message.sender.id,
-      message.sender.label,
-      message.files,
-      message.totalBytes,
-      message.createdAt
+      input.transferId,
+      input.sender.id,
+      input.sender.label,
+      input.files,
+      input.totalBytes,
+      input.createdAt
     )
+    primeTransferSpeedSample(input.transferId)
+
+    return true
+  }
+
+  function registerIncomingTransfer(message: FileOfferMessage) {
+    if (cancelledIncomingTransfers.has(message.transferId)) {
+      return
+    }
+
+    if (
+      !ensureIncomingTransfer({
+        transferId: message.transferId,
+        sender: message.sender,
+        files: message.files,
+        totalBytes: message.totalBytes,
+        createdAt: message.createdAt,
+      })
+    ) {
+      return
+    }
+
+    roomStore.setTransferTransport(message.transferId, 'webrtc')
+    sendDirectTransferReadyAck(message.transferId, message.sender.id)
   }
 
   function appendIncomingFileChunk(message: FileChunkMessage) {
@@ -1806,12 +2783,77 @@ export const useSignalingStore = defineStore('signaling', () => {
       return
     }
 
-    const fileBuffer = transfer.files.get(message.fileId)
+    void appendIncomingTransferChunk({
+      chunkIndex: message.chunkIndex,
+      data: message.data,
+      fileId: message.fileId,
+      totalChunks: message.totalChunks,
+      transfer,
+      transferId: message.transferId,
+    })
+  }
+
+  function sendDirectTransferReadyAck(
+    transferId: string,
+    targetPeerId: string
+  ) {
+    const roomId = activeRoomId.value ?? roomStore.room?.id
+    const localPeerId = sessionStore.peer?.id
+
+    if (!roomId || !localPeerId) {
+      return
+    }
+
+    const ackMessage = {
+      type: 'file-offer-ack',
+      roomId,
+      transferId,
+      peerId: localPeerId,
+      targetPeerId,
+    } satisfies FileOfferAckMessage
+
+    if (roomStore.room?.localMode === 'host') {
+      sendToMember(targetPeerId, ackMessage)
+
+      return
+    }
+
+    if (hostConnection.value?.open) {
+      hostConnection.value.send(ackMessage)
+    }
+  }
+
+  function handleDirectTransferReadyAck(message: FileOfferAckMessage) {
+    const pendingAck = pendingDirectOfferAcks.get(message.transferId)
+
+    if (!pendingAck || pendingAck.recipientPeerId !== message.peerId) {
+      return
+    }
+
+    pendingAck.resolve()
+  }
+
+  async function appendIncomingTransferChunk({
+    chunkIndex,
+    data,
+    fileId,
+    totalChunks,
+    transfer,
+    transferId,
+  }: {
+    chunkIndex: number
+    data: ArrayBuffer
+    fileId: string
+    totalChunks: number
+    transfer: IncomingTransferBuffer
+    transferId: string
+  }) {
+    const fileBuffer = transfer.files.get(fileId)
 
     if (
       !fileBuffer ||
       transfer.failed ||
-      fileBuffer.receivedChunkIndexes.has(message.chunkIndex)
+      fileBuffer.receivedChunkIndexes.has(chunkIndex)
     ) {
       return
     }
@@ -1820,38 +2862,34 @@ export const useSignalingStore = defineStore('signaling', () => {
       .then(async () => {
         if (
           transfer.failed ||
-          cancelledIncomingTransfers.has(message.transferId) ||
-          fileBuffer.receivedChunkIndexes.has(message.chunkIndex)
+          cancelledIncomingTransfers.has(transferId) ||
+          fileBuffer.receivedChunkIndexes.has(chunkIndex)
         ) {
           return
         }
 
         const store = await fileBuffer.storePromise
 
-        await writeTransferStoreChunk(store, message.data)
+        await writeTransferStoreChunk(store, data)
 
-        if (
-          transfer.failed ||
-          cancelledIncomingTransfers.has(message.transferId)
-        ) {
+        if (transfer.failed || cancelledIncomingTransfers.has(transferId)) {
           return
         }
 
-        fileBuffer.receivedChunkIndexes.add(message.chunkIndex)
+        fileBuffer.receivedChunkIndexes.add(chunkIndex)
         fileBuffer.receivedChunks += 1
-        fileBuffer.receivedBytes += message.data.byteLength
-        fileBuffer.totalChunks = message.totalChunks
+        fileBuffer.receivedBytes += data.byteLength
+        fileBuffer.totalChunks = totalChunks
 
         const receivedBytes = Array.from(transfer.files.values()).reduce(
           (sum, currentFile) => sum + currentFile.receivedBytes,
           0
         )
-        const progress =
-          transfer.totalBytes > 0
-            ? (receivedBytes / transfer.totalBytes) * 100
-            : 0
-
-        roomStore.updateTransferProgress(message.transferId, progress)
+        updateTransferProgressForBytes(
+          transferId,
+          receivedBytes,
+          transfer.totalBytes
+        )
       })
       .catch(async (error) => {
         if (transfer.failed) {
@@ -1859,17 +2897,20 @@ export const useSignalingStore = defineStore('signaling', () => {
         }
 
         transfer.failed = true
+        clearTransferSpeedSample(transferId)
         roomStore.failTransfer(
-          message.transferId,
+          transferId,
           error instanceof Error
             ? error.message
             : 'Failed to write the incoming file.'
         )
-        settleHistoryTransfer(message.transferId)
-        incomingTransfers.delete(message.transferId)
-        finishIncomingTransferActivity(message.transferId)
+        settleHistoryTransfer(transferId)
+        incomingTransfers.delete(transferId)
+        finishIncomingTransferActivity(transferId)
         await disposeIncomingTransfer(transfer)
       })
+
+    await fileBuffer.writeChain
   }
 
   async function finalizeIncomingTransfer(transferId: string) {
@@ -1920,15 +2961,273 @@ export const useSignalingStore = defineStore('signaling', () => {
       })
     } catch (error) {
       transfer.failed = true
+      clearTransferSpeedSample(transferId)
       roomStore.failTransfer(
         transferId,
         error instanceof Error ? error.message : 'File assembly failed.'
       )
       settleHistoryTransfer(transferId)
+      await cancelIncomingRelayTransferSession(
+        transferId,
+        'The recipient could not complete the backend relay transfer.'
+      )
       await disposeIncomingTransfer(transfer)
     } finally {
+      clearTransferSpeedSample(transferId)
+      incomingTransfers.delete(transferId)
+      incomingRelayTransfers.get(transferId)?.pollController.abort()
+      incomingRelayTransfers.delete(transferId)
+      finishIncomingTransferActivity(transferId)
+    }
+  }
+
+  function sendRelayChunkAcknowledgement(
+    transferId: string,
+    fileId: string,
+    chunkIndex: number,
+    targetPeerId: string
+  ) {
+    const roomId = activeRoomId.value ?? roomStore.room?.id
+    const localPeerId = sessionStore.peer?.id
+
+    if (!roomId || !localPeerId) {
+      return
+    }
+
+    const ackMessage = {
+      type: 'relay-chunk-ack',
+      roomId,
+      transferId,
+      chunkIndex,
+      fileId,
+      peerId: localPeerId,
+      targetPeerId,
+    } satisfies RelayChunkAckMessage
+
+    if (roomStore.preferBackendRelay && backendRelayClient.isConfigured) {
+      void publishBackendRoomEvent(ackMessage).catch(() => {
+        notificationStore.pushNotification({
+          title: 'Backend relay acknowledgment failed',
+          detail:
+            'The backend relay could not deliver a chunk acknowledgement.',
+          tone: 'warning',
+        })
+      })
+
+      return
+    }
+
+    if (roomStore.room?.localMode === 'host') {
+      sendToMember(targetPeerId, ackMessage)
+
+      return
+    }
+
+    if (hostConnection.value?.open) {
+      hostConnection.value.send(ackMessage)
+    }
+  }
+
+  function handleIncomingRelayChunkAck(message: RelayChunkAckMessage) {
+    const pendingAck = pendingRelayChunkAcks.get(
+      buildRelayChunkAckKey(
+        message.transferId,
+        message.fileId,
+        message.chunkIndex
+      )
+    )
+
+    pendingAck?.resolve()
+  }
+
+  function handleIncomingRelayTransferOffer(message: RelayTransferOfferMessage) {
+    if (
+      !ensureIncomingTransfer({
+        transferId: message.transferId,
+        sender: message.sender,
+        files: message.files,
+        totalBytes: message.totalBytes,
+        createdAt: message.createdAt,
+      })
+    ) {
+      return
+    }
+
+    const currentTransfer = roomStore.transfers.find(
+      (transfer) => transfer.id === message.transferId
+    )
+    const existingRelayTransfer = incomingRelayTransfers.get(message.transferId)
+
+    existingRelayTransfer?.pollController.abort()
+
+    incomingRelayTransfers.set(message.transferId, {
+      expiresAt: message.relay.expiresAt,
+      lastChunkIndex: -1,
+      maxChunkBytes: message.relay.maxChunkBytes,
+      pollController: new AbortController(),
+      pollIntervalMs: message.relay.pollIntervalMs,
+      relayTransferId: message.relay.transferId,
+      sessionId: message.relay.sessionId,
+      senderPeerId: message.sender.id,
+    })
+
+    roomStore.setTransferTransport(message.transferId, 'backend-relay')
+
+    if (currentTransfer?.transport !== 'backend-relay') {
+      notificationStore.pushNotification({
+        title: 'Backend relay active',
+        detail: `${message.sender.label} switched this transfer to backend relay.`,
+        tone: 'info',
+      })
+    }
+
+    void pollIncomingRelayTransfer(message.transferId)
+  }
+
+  async function pollIncomingRelayTransfer(transferId: string) {
+    const relayTransfer = incomingRelayTransfers.get(transferId)
+    const transfer = incomingTransfers.get(transferId)
+    const localPeerId = sessionStore.peer?.id
+
+    if (!relayTransfer || !transfer || !localPeerId) {
+      return
+    }
+
+    const { pollController } = relayTransfer
+
+    try {
+      while (!pollController.signal.aborted) {
+        const nextChunk = await pollBackendRelay({
+          intervalMs: relayTransfer.pollIntervalMs,
+          poll: async () => {
+            const response = await backendRelayClient.pollNextChunk({
+              afterChunkIndex: relayTransfer.lastChunkIndex,
+              peerId: localPeerId,
+              sessionId: relayTransfer.sessionId,
+              transferId: relayTransfer.relayTransferId,
+            })
+
+            if (response.status === 'chunk') {
+              return response
+            }
+
+            if (response.transferState === 'completed') {
+              return response
+            }
+
+            if (response.transferState === 'cancelled') {
+              throw new Error(
+                'The sender cancelled the backend relay transfer.'
+              )
+            }
+
+            if (response.transferState === 'expired') {
+              throw new Error(
+                'The backend relay session expired before the download finished.'
+              )
+            }
+
+            return null
+          },
+          signal: pollController.signal,
+        })
+
+        if (nextChunk.status === 'idle') {
+          await finalizeIncomingTransfer(transferId)
+
+          return
+        }
+
+        await appendIncomingTransferChunk({
+          chunkIndex: nextChunk.value.chunkIndex,
+          data: nextChunk.value.data,
+          fileId: nextChunk.value.fileId,
+          totalChunks: nextChunk.value.totalChunks,
+          transfer,
+          transferId,
+        })
+
+        if (transfer.failed || !incomingTransfers.has(transferId)) {
+          throw new Error(
+            roomStore.transfers.find(
+              (currentTransfer) => currentTransfer.id === transferId
+            )?.error ?? 'Backend relay download failed unexpectedly.'
+          )
+        }
+
+        relayTransfer.lastChunkIndex = nextChunk.value.chunkIndex
+
+        try {
+          await backendRelayClient.acknowledgeChunk({
+            chunkIndex: nextChunk.value.chunkIndex,
+            fileId: nextChunk.value.fileId,
+            peerId: localPeerId,
+            sessionId: relayTransfer.sessionId,
+            transferId: relayTransfer.relayTransferId,
+          })
+        } catch (error) {
+          if (
+            !(error instanceof Error) ||
+            !error.message.includes('already been acknowledged')
+          ) {
+            throw error
+          }
+        }
+
+        sendRelayChunkAcknowledgement(
+          transferId,
+          nextChunk.value.fileId,
+          nextChunk.value.chunkIndex,
+          relayTransfer.senderPeerId
+        )
+      }
+    } catch (error) {
+      if (isAbortError(error)) {
+        return
+      }
+
+      transfer.failed = true
+      clearTransferSpeedSample(transferId)
+      roomStore.failTransfer(
+        transferId,
+        error instanceof Error
+          ? error.message
+          : 'Backend relay download failed unexpectedly.'
+      )
+      settleHistoryTransfer(transferId)
       incomingTransfers.delete(transferId)
       finishIncomingTransferActivity(transferId)
+      await cancelIncomingRelayTransferSession(
+        transferId,
+        error instanceof Error ? error.message : 'Backend relay polling failed.'
+      )
+      await disposeIncomingTransfer(transfer)
+    }
+  }
+
+  async function cancelIncomingRelayTransferSession(
+    transferId: string,
+    reason: string
+  ) {
+    const relayTransfer = incomingRelayTransfers.get(transferId)
+    const localPeerId = sessionStore.peer?.id
+
+    if (!relayTransfer || !localPeerId) {
+      return
+    }
+
+    relayTransfer.pollController.abort()
+    incomingRelayTransfers.delete(transferId)
+
+    try {
+      await backendRelayClient.cancelTransfer({
+        peerId: localPeerId,
+        reason,
+        sessionId: relayTransfer.sessionId,
+        transferId: relayTransfer.relayTransferId,
+      })
+    } catch (error) {
+      void error
     }
   }
 
@@ -1971,10 +3270,11 @@ export const useSignalingStore = defineStore('signaling', () => {
 
         if (trackProgress) {
           sentBytes += chunk.byteLength
-          const progress =
-            (sentBytes / Math.max(transfer.totalBytes ?? sentBytes, 1)) * 100
-
-          roomStore.updateTransferProgress(transfer.id, progress)
+          updateTransferProgressForBytes(
+            transfer.id,
+            sentBytes,
+            transfer.totalBytes ?? sentBytes
+          )
         }
       })
     }
@@ -2031,6 +3331,12 @@ export const useSignalingStore = defineStore('signaling', () => {
       return
     }
 
+    if (roomStore.preferBackendRelay && backendRelayClient.isConfigured) {
+      void publishBackendRoomEvent(message, transfer.senderId)
+
+      return
+    }
+
     if (sendToMember(transfer.senderId, { ...message })) {
       return
     }
@@ -2052,6 +3358,13 @@ export const useSignalingStore = defineStore('signaling', () => {
     }
 
     if (roomTransfer.direction === 'incoming') {
+      if (roomTransfer.transport === 'backend-relay') {
+        void cancelIncomingRelayTransferSession(
+          transferId,
+          'The recipient cancelled the backend relay transfer.'
+        )
+      }
+
       const cancelledTransfer = cancelLocalIncomingTransfer(transferId)
 
       if (!cancelledTransfer) {
@@ -2067,7 +3380,19 @@ export const useSignalingStore = defineStore('signaling', () => {
 
     if (mode) {
       cancelledOutgoingTransfers.add(transferId)
+      rejectPendingDirectOfferAck(
+        transferId,
+        new TransferCancelledError(transferId)
+      )
+      rejectPendingRelayChunkAcksForTransfer(
+        transferId,
+        new TransferCancelledError(transferId)
+      )
       syncCancelledOutgoingTransfer(transferId, mode)
+      void cancelOutgoingRelayTransferSession(
+        transferId,
+        'The sender cancelled the backend relay transfer.'
+      )
     } else {
       roomStore.cancelTransfer(transferId)
     }
@@ -2089,6 +3414,7 @@ export const useSignalingStore = defineStore('signaling', () => {
     }
 
     cancelledIncomingTransfers.delete(transferId)
+    primeTransferSpeedSample(transferId)
     roomStore.updateTransferProgress(transferId, 0, 'queued')
 
     const replayMessage = {
@@ -2100,6 +3426,22 @@ export const useSignalingStore = defineStore('signaling', () => {
 
     if (room.localMode === 'host') {
       handleReplayTransferRequest(replayMessage)
+
+      return true
+    }
+
+    if (roomStore.preferBackendRelay && backendRelayClient.isConfigured) {
+      pulseNetworkActivity()
+      void publishBackendRoomEvent(replayMessage, transfer.senderId).catch(
+        (error) => {
+          roomStore.failTransfer(
+            transferId,
+            error instanceof Error
+              ? error.message
+              : 'Reconnect to the backend relay before requesting this download again.'
+          )
+        }
+      )
 
       return true
     }
@@ -2145,6 +3487,7 @@ export const useSignalingStore = defineStore('signaling', () => {
     }
 
     startOutgoingTransfer(transferId, 'replay', recipientPeerId)
+    primeTransferSpeedSample(transferId)
     roomStore.updateTransferProgress(transferId, 0, 'queued')
 
     const offer: FileOfferMessage = {
@@ -2308,6 +3651,59 @@ export const useSignalingStore = defineStore('signaling', () => {
       ensureHost(activeRoomId.value)
     }
   }
+
+  watch(
+    () => roomStore.preferBackendRelay,
+    (preferBackendRelay, previousValue) => {
+      if (preferBackendRelay === previousValue) {
+        return
+      }
+
+      if (
+        preferBackendRelay &&
+        (state.value === 'connected' || state.value === 'listening') &&
+        backendRelayClient.isConfigured
+      ) {
+        void startBackendRoomEventPolling()
+      }
+
+      if (mode.value === 'host') {
+        broadcastRoomSync()
+
+        return
+      }
+
+      if (
+        mode.value === 'join' &&
+        hostConnection.value?.open &&
+        activeRoomId.value &&
+        sessionStore.peer
+      ) {
+        hostConnection.value.send({
+          type: 'relay-preference',
+          peerId: sessionStore.peer.id,
+          preferBackendRelay,
+          roomId: activeRoomId.value,
+        } satisfies RelayPreferenceMessage)
+      }
+    }
+  )
+
+  watch(
+    backendRoomRelayKey,
+    (nextKey) => {
+      stopBackendRoomEventPolling()
+
+      if (!nextKey) {
+        return
+      }
+
+      void startBackendRoomEventPolling()
+    },
+    {
+      immediate: true,
+    }
+  )
 })
 
 function isSignalingMessage(value: unknown): value is SignalingMessage {

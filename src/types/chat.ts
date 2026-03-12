@@ -19,6 +19,7 @@ export type MessageKind = 'text' | 'system'
 export type MessageDeliveryState = 'local' | 'pending' | 'sent' | 'failed'
 export type PresenceEventType = 'host-created' | 'joined' | 'left'
 export type TransferDirection = 'incoming' | 'outgoing'
+export type TransferTransport = 'webrtc' | 'backend-relay'
 export type TransferStatus =
   | 'queued'
   | 'transferring'
@@ -76,10 +77,12 @@ export interface FileTransfer {
   peerId: string
   peerLabel?: string
   direction: TransferDirection
+  transport: TransferTransport
   status: TransferStatus
   progress: number
   createdAt: string
   totalBytes?: number
+  bytesPerSecond?: number
   error?: string
   files: TransferFile[]
 }

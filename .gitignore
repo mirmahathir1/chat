@@ -13,6 +13,8 @@ dist-ssr
 coverage
 tmp
 *.local
+cypress/screenshots
+cypress/videos
 
 # Editor directories and files
 .vscode/*
@@ -24,3 +26,4 @@ tmp
 *.njsproj
 *.sln
 *.sw?
+.vercel

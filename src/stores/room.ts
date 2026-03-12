@@ -1,9 +1,11 @@
 import { defineStore } from 'pinia'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { hasConfiguredBackendRelay } from '@/lib/backendRelayClient'
 import { createTransferFiles, validateTransferFiles } from '@/lib/fileTransfer'
 import { createHumanReadableId, formatHumanReadableId } from '@/lib/humanId'
 import { createId } from '@/lib/id'
 import { buildShareUrl } from '@/lib/roomLink'
+import { normalizeTransfer } from '@/lib/transferTransport'
 import type {
   ChatMessage,
   FileTransfer,
@@ -12,6 +14,7 @@ import type {
   RoomNotification,
   RoomSummary,
   TransferFile,
+  TransferTransport,
 } from '@/types/chat'
 import { useNotificationStore } from '@/stores/notifications'
 import { useSessionStore } from '@/stores/session'
@@ -129,6 +132,7 @@ export const useRoomStore = defineStore('room', () => {
   const presenceEvents = ref<PresenceEvent[]>(loadStoredPresenceEvents())
   const transfers = ref<FileTransfer[]>([])
   const draftMessage = ref('')
+  const preferBackendRelay = ref(false)
 
   const sessionStore = useSessionStore()
   const notificationStore = useNotificationStore()
@@ -147,9 +151,33 @@ export const useRoomStore = defineStore('room', () => {
   )
   const isHostView = computed(() => room.value?.localMode === 'host')
   const isJoinView = computed(() => room.value?.localMode === 'join')
+  const activeTransferTransport = computed<TransferTransport>(() => {
+    const activeTransfer = transfers.value.find(
+      (transfer) =>
+        transfer.status === 'queued' || transfer.status === 'transferring'
+    )
+
+    return activeTransfer?.transport ?? 'webrtc'
+  })
+  const relayBackendConfigured = computed(() => hasConfiguredBackendRelay())
 
   function persistRoomState() {
     return
+  }
+
+  function buildRoomShareUrl(roomId: string, hostPeerId: string) {
+    return buildShareUrl(roomId, hostPeerId, preferBackendRelay.value)
+  }
+
+  function syncRoomShareUrl() {
+    if (!room.value) {
+      return
+    }
+
+    room.value = {
+      ...room.value,
+      shareUrl: buildRoomShareUrl(room.value.id, room.value.hostPeerId),
+    }
   }
 
   function bootstrapHostedRoom(roomId = createHumanReadableId()) {
@@ -159,7 +187,7 @@ export const useRoomStore = defineStore('room', () => {
       id: roomId,
       name: buildRoomName('Hosted room', roomId),
       hostPeerId: host.id,
-      shareUrl: buildShareUrl(roomId, host.id),
+      shareUrl: buildRoomShareUrl(roomId, host.id),
       createdAt: now,
       status: 'active',
       localMode: 'host',
@@ -195,10 +223,15 @@ export const useRoomStore = defineStore('room', () => {
     return hostedRoom.id
   }
 
-  function prepareJoinRoom(roomId: string, hostPeerId: string) {
+  function prepareJoinRoom(
+    roomId: string,
+    hostPeerId: string,
+    nextPreferBackendRelay = preferBackendRelay.value
+  ) {
     const localPeer = sessionStore.rotatePeerIdentity('member')
     const now = new Date().toISOString()
 
+    preferBackendRelay.value = nextPreferBackendRelay
     sessionStore.setRole('member')
     sessionStore.setConnectionState('idle')
 
@@ -206,7 +239,7 @@ export const useRoomStore = defineStore('room', () => {
       id: roomId,
       name: buildRoomName('Join room', roomId),
       hostPeerId,
-      shareUrl: buildShareUrl(roomId, hostPeerId),
+      shareUrl: buildRoomShareUrl(roomId, hostPeerId),
       createdAt: now,
       status: 'draft',
       localMode: 'join',
@@ -275,7 +308,7 @@ export const useRoomStore = defineStore('room', () => {
     room.value = {
       ...room.value,
       hostPeerId: nextHostPeerId,
-      shareUrl: buildShareUrl(room.value.id, nextHostPeerId),
+      shareUrl: buildRoomShareUrl(room.value.id, nextHostPeerId),
     }
     members.value = members.value.map((member) =>
       member.role === 'host'
@@ -343,19 +376,20 @@ export const useRoomStore = defineStore('room', () => {
   }
 
   function upsertTransfer(transfer: FileTransfer) {
+    const normalizedTransfer = normalizeTransfer(transfer)
     const existingIndex = transfers.value.findIndex(
-      (currentTransfer) => currentTransfer.id === transfer.id
+      (currentTransfer) => currentTransfer.id === normalizedTransfer.id
     )
 
     if (existingIndex === -1) {
-      transfers.value = [transfer, ...transfers.value].slice(0, 20)
+      transfers.value = [normalizedTransfer, ...transfers.value].slice(0, 20)
 
       return
     }
 
     transfers.value = transfers.value.map((currentTransfer, index) =>
       index === existingIndex
-        ? { ...currentTransfer, ...transfer }
+        ? normalizeTransfer({ ...currentTransfer, ...normalizedTransfer })
         : currentTransfer
     )
   }
@@ -390,10 +424,12 @@ export const useRoomStore = defineStore('room', () => {
         room.value?.localMode === 'join' ? room.value.hostPeerId : localPeer.id,
       peerLabel: 'Room members',
       direction: 'outgoing',
+      transport: preferBackendRelay.value ? 'backend-relay' : 'webrtc',
       status: 'queued',
       progress: 0,
       createdAt: new Date().toISOString(),
       totalBytes: validation.totalBytes,
+      bytesPerSecond: undefined,
       files: createTransferFiles(validation.files),
     }
 
@@ -425,11 +461,13 @@ export const useRoomStore = defineStore('room', () => {
       peerId: senderId,
       peerLabel: senderLabel,
       direction: 'incoming',
+      transport: existingTransfer?.transport ?? 'webrtc',
       status: 'queued',
       progress: 0,
       createdAt:
         existingTransfer?.createdAt ?? createdAt ?? new Date().toISOString(),
       totalBytes,
+      bytesPerSecond: undefined,
       files,
     })
   }
@@ -437,7 +475,8 @@ export const useRoomStore = defineStore('room', () => {
   function updateTransferProgress(
     transferId: string,
     progress: number,
-    status: FileTransfer['status'] = 'transferring'
+    status: FileTransfer['status'] = 'transferring',
+    bytesPerSecond?: number
   ) {
     const transfer = transfers.value.find(
       (currentTransfer) => currentTransfer.id === transferId
@@ -451,6 +490,10 @@ export const useRoomStore = defineStore('room', () => {
       ...transfer,
       status,
       progress: Math.max(0, Math.min(100, progress)),
+      bytesPerSecond:
+        status === 'transferring'
+          ? bytesPerSecond ?? transfer.bytesPerSecond
+          : undefined,
       error: undefined,
     })
   }
@@ -469,6 +512,7 @@ export const useRoomStore = defineStore('room', () => {
       files: files ?? transfer.files,
       status: 'completed',
       progress: 100,
+      bytesPerSecond: undefined,
       error: undefined,
     })
   }
@@ -485,6 +529,7 @@ export const useRoomStore = defineStore('room', () => {
     upsertTransfer({
       ...transfer,
       status: 'failed',
+      bytesPerSecond: undefined,
       error,
     })
   }
@@ -502,6 +547,7 @@ export const useRoomStore = defineStore('room', () => {
       ...transfer,
       status: 'cancelled',
       progress: 0,
+      bytesPerSecond: undefined,
       error: undefined,
     })
   }
@@ -515,6 +561,7 @@ export const useRoomStore = defineStore('room', () => {
       return {
         ...transfer,
         status: 'failed',
+        bytesPerSecond: undefined,
         error,
       }
     })
@@ -525,8 +572,37 @@ export const useRoomStore = defineStore('room', () => {
   }
 
   function replaceTransfers(nextTransfers: FileTransfer[]) {
-    transfers.value = nextTransfers
+    transfers.value = nextTransfers.map(normalizeTransfer)
     persistRoomState()
+  }
+
+  function setPreferBackendRelay(enabled: boolean) {
+    preferBackendRelay.value = enabled
+    syncRoomShareUrl()
+    persistRoomState()
+  }
+
+  watch(preferBackendRelay, () => {
+    syncRoomShareUrl()
+    persistRoomState()
+  })
+
+  function setTransferTransport(
+    transferId: string,
+    transport: TransferTransport
+  ) {
+    const transfer = transfers.value.find(
+      (currentTransfer) => currentTransfer.id === transferId
+    )
+
+    if (!transfer) {
+      return
+    }
+
+    upsertTransfer({
+      ...transfer,
+      transport,
+    })
   }
 
   function upsertMember(member: PeerIdentity) {
@@ -711,12 +787,15 @@ export const useRoomStore = defineStore('room', () => {
     presenceEvents,
     transfers,
     draftMessage,
+    preferBackendRelay,
     memberCount,
     connectedMemberCount,
     hasActiveRoom,
     hostPeer,
     isHostView,
     isJoinView,
+    activeTransferTransport,
+    relayBackendConfigured,
     bootstrapHostedRoom,
     prepareJoinRoom,
     ensureHostedRoom,
@@ -735,6 +814,8 @@ export const useRoomStore = defineStore('room', () => {
     failTransfersForPeer,
     resetTransfers,
     replaceTransfers,
+    setPreferBackendRelay,
+    setTransferTransport,
     upsertMember,
     replaceMembers,
     removeMember,
