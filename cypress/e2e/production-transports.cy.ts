@@ -1,5 +1,8 @@
 const transcriptSelector = '[data-testid="chat-transcript"]'
-const roomCodeSelector = '[data-testid="room-code-value"], .share-panel__room-code code'
+const roomCodeSelector =
+  '[data-testid="room-code-value"], .share-panel__room-code code'
+const advancedOptionsToggleSelector =
+  '[data-testid="advanced-options-toggle"], .relay-panel__summary'
 const relayModeLabelSelector =
   '[data-testid="relay-mode-label"], .relay-panel__switch-label'
 const relayToggleSelector =
@@ -14,14 +17,19 @@ function visitHostHome(relay = false) {
     timeout: 30000,
   }).should('be.visible')
 
+  cy.get(advancedOptionsToggleSelector).then(($toggle) => {
+    const details = $toggle.closest('details')[0]
+
+    if (details instanceof HTMLDetailsElement && !details.open) {
+      cy.wrap($toggle).click()
+    }
+  })
+
   if (relay) {
     cy.get(relayToggleSelector).check({
       force: true,
     })
-    cy.get(relayModeLabelSelector).should(
-      'contain',
-      'Backend relay'
-    )
+    cy.get(relayModeLabelSelector).should('contain', 'Backend relay')
   } else {
     cy.get(relayModeLabelSelector).should('contain', 'WebRTC first')
   }
@@ -103,12 +111,9 @@ describe('production transport flows', () => {
     cy.get(attachFilesSelector).click({
       force: true,
     })
-    cy.get(fileInputSelector).selectFile(
-      'cypress/fixtures/webrtc-upload.txt',
-      {
-        force: true,
-      }
-    )
+    cy.get(fileInputSelector).selectFile('cypress/fixtures/webrtc-upload.txt', {
+      force: true,
+    })
 
     cy.contains('[data-testid="chat-entry"]', fileName, {
       timeout: 60000,

@@ -7,9 +7,15 @@ const props = withDefaults(
   defineProps<{
     room: RoomSummary
     showHeader?: boolean
+    showActions?: boolean
+    showQr?: boolean
+    showRoomCode?: boolean
   }>(),
   {
+    showActions: true,
     showHeader: true,
+    showQr: true,
+    showRoomCode: true,
   }
 )
 
@@ -21,7 +27,7 @@ const manualJoinCode = computed(() =>
 )
 
 watchEffect(async () => {
-  if (!isHostView.value) {
+  if (!isHostView.value || !props.showQr) {
     qrDataUrl.value = ''
 
     return
@@ -59,27 +65,24 @@ async function copyShareLink() {
       { 'share-panel--headerless': !showHeader },
     ]"
   >
-    <Transition name="ui-fade" appear>
-      <div v-if="showHeader" class="section-heading">
-        <span class="phase-chip">Invite link</span>
-      </div>
-    </Transition>
-
     <Transition name="ui-fade-scale" appear>
-      <div v-if="isHostView" class="share-panel__qr">
+      <div v-if="isHostView && props.showQr" class="share-panel__qr">
         <img :src="qrDataUrl" alt="QR code for the room invite link" />
       </div>
     </Transition>
 
     <Transition name="ui-fade" appear>
-      <div v-if="manualJoinCode" class="share-panel__room-code">
+      <div
+        v-if="manualJoinCode && props.showRoomCode"
+        class="share-panel__room-code"
+      >
         <span>Room code</span>
         <code data-testid="room-code-value">{{ manualJoinCode }}</code>
         <p>Type this code on another device to connect.</p>
       </div>
     </Transition>
 
-    <div class="share-panel__actions">
+    <div v-if="props.showActions" class="share-panel__actions">
       <button
         type="button"
         data-testid="copy-join-link"
@@ -116,26 +119,6 @@ async function copyShareLink() {
 .share-panel--headerless .share-panel__room-code code {
   font-size: clamp(1.8rem, 7vw, 2.75rem);
   letter-spacing: 0.06em;
-}
-
-.section-heading {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
-}
-
-h2 {
-  margin: 0.25rem 0 0;
-  font-size: 1.35rem;
-}
-
-.phase-chip {
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 0.4rem 0.7rem;
-  color: var(--text-muted);
-  font-size: 0.82rem;
 }
 
 .share-panel__qr {

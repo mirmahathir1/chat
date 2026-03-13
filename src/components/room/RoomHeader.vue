@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AppBrand from '@/components/AppBrand.vue'
 import type { PeerIdentity, RoomSummary, SignalingState } from '@/types/chat'
 
 defineProps<{
@@ -18,7 +19,7 @@ defineEmits<{
 <template>
   <header class="panel room-header">
     <div class="room-header__content">
-      <p class="eyebrow">Hosted P2P Chat</p>
+      <AppBrand compact class="room-header__brand" />
       <div class="room-header__title-row">
         <div>
           <h1>{{ room.name }}</h1>
@@ -35,7 +36,9 @@ defineEmits<{
         </div>
         <div class="room-header__status">
           <span class="status-pill">Status {{ room.status }}</span>
-          <span class="status-pill">Active members {{ activeMemberCount }}</span>
+          <span class="status-pill"
+            >Active members {{ activeMemberCount }}</span
+          >
           <span class="status-pill">Signaling {{ signalingState }}</span>
           <span class="status-pill">Presence events {{ presenceCount }}</span>
         </div>
@@ -59,6 +62,10 @@ defineEmits<{
 .room-header__content {
   flex: 1;
   min-width: 0;
+}
+
+.room-header__brand {
+  margin-bottom: 1rem;
 }
 
 .room-header__title-row {

@@ -18,8 +18,16 @@ fi
 
 cd "${ROOT_DIR}"
 
+NODEMON_ARGS=(
+  --watch src
+  --ext ts,json
+  --signal SIGTERM
+)
+
+if [[ "${NODEMON_LEGACY_WATCH:-false}" == "true" ]]; then
+  NODEMON_ARGS+=(--legacy-watch)
+fi
+
 exec "${NODEMON_BIN}" \
-  --watch src \
-  --ext ts,json \
-  --signal SIGTERM \
+  "${NODEMON_ARGS[@]}" \
   --exec "node --import tsx src/server.ts"

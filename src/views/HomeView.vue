@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { storeToRefs } from 'pinia'
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import AppBrand from '@/components/AppBrand.vue'
 import RelayPreferencePanel from '@/components/room/RelayPreferencePanel.vue'
 import { normalizeHumanReadableId } from '@/lib/humanId'
 import SharePanel from '@/components/room/SharePanel.vue'
@@ -15,7 +16,6 @@ const {
   room,
   connectedMemberCount,
   preferBackendRelay,
-  activeTransferTransport,
   relayBackendConfigured,
 } = storeToRefs(roomStore)
 const {
@@ -25,6 +25,7 @@ const {
 } = storeToRefs(signalingStore)
 const joinRoomCode = ref('')
 const joinRoomError = ref('')
+const showSharePanel = computed(() => Boolean(room.value && isReady.value))
 
 if (!roomStore.room || roomStore.room.localMode !== 'host') {
   signalingStore.ensureHost(roomStore.bootstrapHostedRoom())
@@ -86,6 +87,7 @@ function joinTypedRoom() {
 <template>
   <main class="page-shell home-view">
     <section class="panel home-view__launchpad">
+      <AppBrand class="home-view__brand" />
       <h2>Scan the QR code or type the room code to join the live room.</h2>
 
       <Transition name="ui-fade" appear>
@@ -110,47 +112,70 @@ function joinTypedRoom() {
         </div>
       </Transition>
 
-      <Transition name="ui-fade-scale" appear>
-        <SharePanel v-if="room && isReady" :room="room" :show-header="false" />
-      </Transition>
-
-      <RelayPreferencePanel
-        v-model="preferBackendRelay"
-        :configured="relayBackendConfigured"
-        :transport="activeTransferTransport"
-      />
-
-      <form class="home-view__manual-join" @submit.prevent="joinTypedRoom">
-        <p class="eyebrow">Manual join</p>
-        <label class="home-view__manual-join-label" for="room-code">
-          Type a room code
-        </label>
-        <div class="home-view__manual-join-row">
-          <input
-            id="room-code"
-            v-model="joinRoomCode"
-            type="text"
-            data-testid="manual-room-code"
-            placeholder="amber-wave-42"
-            autocapitalize="off"
-            autocomplete="off"
-            spellcheck="false"
-            @input="joinRoomError = ''"
+      <div
+        :class="[
+          'home-view__content',
+          { 'home-view__content--single': !showSharePanel },
+        ]"
+      >
+        <Transition name="ui-fade-scale" appear>
+          <SharePanel
+            v-if="showSharePanel && room"
+            :room="room"
+            :show-header="false"
+            :show-actions="false"
+            :show-room-code="false"
           />
-          <button
-            type="submit"
-            class="secondary-button"
-            data-testid="join-room-button"
-          >
-            Join room
-          </button>
-        </div>
-        <Transition name="ui-fade" appear>
-          <p v-if="joinRoomError" class="home-view__manual-join-error">
-            {{ joinRoomError }}
-          </p>
         </Transition>
-      </form>
+
+        <div class="home-view__secondary">
+          <Transition name="ui-fade" appear>
+            <SharePanel
+              v-if="showSharePanel && room"
+              :room="room"
+              :show-header="false"
+              :show-qr="false"
+            />
+          </Transition>
+
+          <form class="home-view__manual-join" @submit.prevent="joinTypedRoom">
+            <p class="eyebrow">Manual join</p>
+            <label class="home-view__manual-join-label" for="room-code">
+              Type room code of other device
+            </label>
+            <div class="home-view__manual-join-row">
+              <input
+                id="room-code"
+                v-model="joinRoomCode"
+                type="text"
+                data-testid="manual-room-code"
+                placeholder="amber-wave-42"
+                autocapitalize="off"
+                autocomplete="off"
+                spellcheck="false"
+                @input="joinRoomError = ''"
+              />
+              <button
+                type="submit"
+                class="secondary-button"
+                data-testid="join-room-button"
+              >
+                Join room
+              </button>
+            </div>
+            <Transition name="ui-fade" appear>
+              <p v-if="joinRoomError" class="home-view__manual-join-error">
+                {{ joinRoomError }}
+              </p>
+            </Transition>
+          </form>
+
+          <RelayPreferencePanel
+            v-model="preferBackendRelay"
+            :configured="relayBackendConfigured"
+          />
+        </div>
+      </div>
     </section>
   </main>
 </template>
@@ -168,6 +193,10 @@ function joinTypedRoom() {
   padding: 1.75rem;
 }
 
+.home-view__brand {
+  margin-bottom: 1rem;
+}
+
 h2 {
   margin: 0.35rem 0 0;
   font-size: 1.5rem;
@@ -180,12 +209,25 @@ h2 {
   color: var(--text-muted);
 }
 
+.home-view__content {
+  display: grid;
+  gap: 1rem;
+  margin-top: 1.25rem;
+}
+
+.home-view__secondary {
+  display: grid;
+  align-content: start;
+  gap: 1rem;
+}
+
 .home-view__manual-join {
   display: grid;
   gap: 0.75rem;
-  margin-top: 1rem;
-  padding-top: 1.25rem;
-  border-top: 1px solid var(--border);
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .home-view__manual-join-label {
@@ -210,6 +252,21 @@ h2 {
 @media (max-width: 640px) {
   .home-view__manual-join-row {
     flex-direction: column;
+  }
+}
+
+@media (min-width: 900px) {
+  .home-view__launchpad {
+    width: min(100%, 62rem);
+  }
+
+  .home-view__content {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+  }
+
+  .home-view__content--single {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 </style>

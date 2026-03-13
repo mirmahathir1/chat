@@ -9,6 +9,7 @@ describe('backend relay chat', () => {
     )
 
     cy.visit('/')
+    cy.get('[data-testid="advanced-options-toggle"]').click()
     cy.get('[data-testid="relay-toggle"]').check({
       force: true,
     })
@@ -28,7 +29,9 @@ describe('backend relay chat', () => {
 
     cy.task('secondaryBrowser:waitForChatReady')
     cy.url().should('include', '/room/')
-    cy.get('[data-testid="chat-draft"]').should('be.visible').type('hello from host')
+    cy.get('[data-testid="chat-draft"]')
+      .should('be.visible')
+      .type('hello from host')
     cy.get('[data-testid="send-message"]').click()
 
     cy.wait('@publishRoomEvent').then(({ request }) => {

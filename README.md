@@ -1,4 +1,4 @@
-# Hosted P2P Chat
+# P2P Chat
 
 Hosted room chat built with Vue 3, Vite, TypeScript, Pinia, Vue Router, Cypress, ESLint, and Prettier.
 
@@ -11,6 +11,19 @@ Hosted room chat built with Vue 3, Vite, TypeScript, Pinia, Vue Router, Cypress,
 - `npm run format` runs Prettier
 - `npm test` runs the Cypress relay e2e flow against local frontend and backend servers
 - `npm run test:e2e:open` opens Cypress for local interactive runs
+
+## Docker local development
+
+Run `./run.sh` to build and start the full stack with Docker.
+
+If you want direct Compose control, `run.sh` passes arguments through to Docker Compose, so `./run.sh down` stops the stack and `./run.sh logs -f` tails logs.
+
+If you want backend relay file transfers to work locally, set `BLOB_READ_WRITE_TOKEN` in `.env.local` before starting Docker. `run.sh` loads `.env.local` and passes the token into the backend container.
+
+- Frontend: `http://localhost:5173`
+- Backend health: `http://localhost:8787/api/health`
+
+The compose stack mounts the source tree into both containers so frontend Vite reloads and backend nodemon restarts on local file changes.
 
 ## Deployment
 

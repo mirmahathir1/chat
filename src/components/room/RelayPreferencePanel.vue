@@ -1,13 +1,10 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { getTransferTransportLabel } from '@/lib/transferTransport'
-import type { TransferTransport } from '@/types/chat'
 
 const props = withDefaults(
   defineProps<{
     configured?: boolean
     modelValue: boolean
-    transport: TransferTransport
   }>(),
   {
     configured: true,
@@ -18,11 +15,7 @@ const emit = defineEmits<{
   'update:modelValue': [value: boolean]
 }>()
 
-const transportLabel = computed(() => getTransferTransportLabel(props.transport))
 const modeStateLabel = computed(() =>
-  props.modelValue ? 'Backend relay' : 'WebRTC first'
-)
-const preferenceLabel = computed(() =>
   props.modelValue ? 'Backend relay' : 'WebRTC first'
 )
 const detailLabel = computed(() =>
@@ -37,49 +30,84 @@ function handleToggle(event: Event) {
 </script>
 
 <template>
-  <section class="relay-panel">
-    <div class="relay-panel__header">
-      <div class="relay-panel__copy">
-        <p class="eyebrow">Transfer route</p>
-        <h3>Backend relay</h3>
-        <p class="relay-panel__detail">{{ detailLabel }}</p>
-        <p v-if="modelValue && !configured" class="relay-panel__warning">
-          Backend relay is selected, but `VITE_RELAY_BACKEND_URL` is not set yet.
-        </p>
-      </div>
-      <label class="relay-panel__switch" data-testid="relay-switch">
-        <input
-          :checked="modelValue"
-          type="checkbox"
-          data-testid="relay-toggle"
-          @change="handleToggle"
-        />
-        <span class="relay-panel__slider" aria-hidden="true" />
-        <span class="relay-panel__switch-label" data-testid="relay-mode-label">
-          {{ modeStateLabel }}
-        </span>
-      </label>
-    </div>
+  <details class="relay-panel" data-testid="advanced-options">
+    <summary class="relay-panel__summary" data-testid="advanced-options-toggle">
+      <span class="relay-panel__summary-label">Advanced Options</span>
+      <span class="relay-panel__summary-icon" aria-hidden="true" />
+    </summary>
 
-    <div class="relay-panel__status" data-testid="relay-status">
-      <span class="relay-panel__pill" data-testid="relay-transport-pill">
-        Transport {{ transportLabel }}
-      </span>
-      <span class="relay-panel__pill" data-testid="relay-preference-pill">
-        Preference {{ preferenceLabel }}
-      </span>
+    <div class="relay-panel__content">
+      <div class="relay-panel__header">
+        <div class="relay-panel__copy">
+          <p class="eyebrow">Transfer route</p>
+          <p class="relay-panel__detail">{{ detailLabel }}</p>
+          <p v-if="modelValue && !configured" class="relay-panel__warning">
+            Backend relay is selected, but `VITE_RELAY_BACKEND_URL` is not set
+            yet.
+          </p>
+        </div>
+        <label class="relay-panel__switch" data-testid="relay-switch">
+          <input
+            :checked="modelValue"
+            type="checkbox"
+            data-testid="relay-toggle"
+            @change="handleToggle"
+          />
+          <span class="relay-panel__slider" aria-hidden="true" />
+          <span
+            class="relay-panel__switch-label"
+            data-testid="relay-mode-label"
+          >
+            {{ modeStateLabel }}
+          </span>
+        </label>
+      </div>
     </div>
-  </section>
+  </details>
 </template>
 
 <style scoped>
 .relay-panel {
-  display: grid;
-  gap: 0.9rem;
-  padding: 1rem;
   border: 1px solid var(--border);
   border-radius: 1rem;
   background: rgba(255, 255, 255, 0.03);
+}
+
+.relay-panel__summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.relay-panel__summary::-webkit-details-marker {
+  display: none;
+}
+
+.relay-panel__summary-label {
+  color: var(--text-main);
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.relay-panel__summary-icon {
+  width: 0.65rem;
+  height: 0.65rem;
+  border-right: 2px solid var(--text-muted);
+  border-bottom: 2px solid var(--text-muted);
+  transform: rotate(45deg);
+  transition: transform 180ms ease;
+}
+
+.relay-panel[open] .relay-panel__summary-icon {
+  transform: rotate(225deg);
+}
+
+.relay-panel__content {
+  padding: 0 1rem 1rem;
 }
 
 .relay-panel__header {
@@ -87,15 +115,12 @@ function handleToggle(event: Event) {
   align-items: flex-start;
   justify-content: space-between;
   gap: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
 }
 
 .relay-panel__copy {
   min-width: 0;
-}
-
-h3 {
-  margin: 0.25rem 0 0;
-  font-size: 1.05rem;
 }
 
 .relay-panel__detail,
@@ -167,20 +192,6 @@ h3 {
 
 .relay-panel__switch-label {
   color: var(--text-muted);
-}
-
-.relay-panel__status {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.65rem;
-}
-
-.relay-panel__pill {
-  border: 1px solid var(--border-strong);
-  border-radius: 999px;
-  padding: 0.45rem 0.7rem;
-  background: rgba(255, 255, 255, 0.04);
-  font-size: 0.82rem;
 }
 
 @media (max-width: 640px) {

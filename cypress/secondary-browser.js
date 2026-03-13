@@ -6,6 +6,9 @@ const fileInputSelector = '[data-testid="file-input"], .chat-panel__file-input'
 const joinRoomButtonSelector =
   '[data-testid="join-room-button"], .home-view__manual-join-row button[type="submit"]'
 const manualRoomCodeSelector = '[data-testid="manual-room-code"], #room-code'
+const advancedOptionsSelector = '[data-testid="advanced-options"]'
+const advancedOptionsToggleSelector =
+  '[data-testid="advanced-options-toggle"], .relay-panel__summary'
 const relaySwitchSelector = '[data-testid="relay-switch"], .relay-panel__switch'
 const relayToggleSelector =
   '[data-testid="relay-toggle"], .relay-panel__switch input[type="checkbox"]'
@@ -27,11 +30,9 @@ async function waitForEnabledSelector(currentPage, selector, timeoutMs) {
     (targetSelector) => {
       const element = document.querySelector(targetSelector)
 
-      return (
-        element instanceof HTMLInputElement ||
+      return element instanceof HTMLInputElement ||
         element instanceof HTMLTextAreaElement ||
         element instanceof HTMLButtonElement
-      )
         ? !element.disabled
         : false
     },
@@ -54,19 +55,37 @@ async function waitForHomeReady(currentPage, timeoutMs) {
   await waitForVisibleSelector(currentPage, joinRoomButtonSelector, timeoutMs)
 }
 
+async function ensureAdvancedOptionsOpen(currentPage) {
+  await waitForVisibleSelector(
+    currentPage,
+    advancedOptionsToggleSelector,
+    20000
+  )
+
+  const isOpen = await currentPage.$eval(advancedOptionsSelector, (element) => {
+    if (!(element instanceof HTMLDetailsElement)) {
+      throw new Error('Advanced options container is not a details element.')
+    }
+
+    return element.open
+  })
+
+  if (!isOpen) {
+    await currentPage.click(advancedOptionsToggleSelector)
+  }
+}
+
 async function setRelayMode(currentPage, enabled) {
+  await ensureAdvancedOptionsOpen(currentPage)
   await waitForVisibleSelector(currentPage, relaySwitchSelector, 20000)
 
-  const isChecked = await currentPage.$eval(
-    relayToggleSelector,
-    (element) => {
-      if (!(element instanceof HTMLInputElement)) {
-        throw new Error('Relay toggle is not an input.')
-      }
-
-      return element.checked
+  const isChecked = await currentPage.$eval(relayToggleSelector, (element) => {
+    if (!(element instanceof HTMLInputElement)) {
+      throw new Error('Relay toggle is not an input.')
     }
-  )
+
+    return element.checked
+  })
 
   if (isChecked === enabled) {
     return
