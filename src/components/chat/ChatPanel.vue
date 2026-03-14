@@ -518,7 +518,9 @@ watch(
                 </strong>
                 <span>{{ formatTimeLabel(entry.item.createdAt) }}</span>
                 <span>{{ entry.item.status }}</span>
-                <span>{{ getTransferTransportLabel(entry.item.transport) }}</span>
+                <span>{{
+                  getTransferTransportLabel(entry.item.transport)
+                }}</span>
               </div>
               <Transition name="ui-fade" appear>
                 <div
@@ -599,11 +601,15 @@ watch(
                 >
                   {{ formatTransferSpeed(entry.item.bytesPerSecond) }}
                 </span>
-                <span>{{ getTransferTransportLabel(entry.item.transport) }}</span>
+                <span>{{
+                  getTransferTransportLabel(entry.item.transport)
+                }}</span>
               </div>
               <ul class="chat-panel__transfer-files">
                 <li v-for="file in entry.item.files" :key="file.id">
-                  <span>{{ file.name }}</span>
+                  <span class="chat-panel__transfer-file-name">
+                    {{ file.name }}
+                  </span>
                   <a
                     v-if="file.downloadUrl"
                     :href="file.downloadUrl"
@@ -992,6 +998,18 @@ h2 {
   padding: 0;
   list-style: none;
   font-size: 0.9rem;
+}
+
+.chat-panel__transfer-file-name {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.chat-panel__transfer-files li a {
+  flex-shrink: 0;
 }
 
 .chat-panel__transfer-error {
