@@ -1,13 +1,8 @@
 import type { FileTransfer, TransferFile } from '@/types/chat'
+import { stripLocalFileUrls } from '@/lib/transferFiles'
 
 export function buildReplayTransferFiles(files: TransferFile[]) {
-  return files.map((file) => {
-    const nextFile = { ...file }
-
-    delete nextFile.downloadUrl
-
-    return nextFile
-  })
+  return stripLocalFileUrls(files)
 }
 
 export function listTransfersToReplay(

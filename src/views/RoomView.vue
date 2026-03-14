@@ -212,18 +212,17 @@ const {
             </section>
           </Transition>
 
-          <section class="panel room-view__transport-panel">
-            <p class="eyebrow">Transport</p>
-            <h2>{{ currentTransportLabel }}</h2>
-            <p>{{ currentTransportDetail }}</p>
-          </section>
-
           <SharePanel :room="room" />
           <MembersPanel
             :members="members"
             :host-peer-id="room.hostPeerId"
             :active-member-count="connectedMemberCount"
           />
+          <section class="panel room-view__transport-panel">
+            <p class="eyebrow">Transport</p>
+            <h2>{{ currentTransportLabel }}</h2>
+            <p>{{ currentTransportDetail }}</p>
+          </section>
         </aside>
       </Transition>
 
@@ -434,6 +433,48 @@ const {
 .room-view__drawer--left {
   left: 0;
   border-right: 1px solid var(--border);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(242, 164, 99, 0.92) rgba(255, 255, 255, 0.06);
+  scrollbar-gutter: stable;
+}
+
+.room-view__drawer--left::-webkit-scrollbar {
+  width: 0.9rem;
+}
+
+.room-view__drawer--left::-webkit-scrollbar-track {
+  margin: 0.5rem 0;
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  border-radius: 999px;
+  background:
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.06),
+      rgba(255, 255, 255, 0.02)
+    ),
+    rgba(20, 14, 12, 0.92);
+  box-shadow: inset 0 0 0 1px rgba(242, 164, 99, 0.08);
+}
+
+.room-view__drawer--left::-webkit-scrollbar-thumb {
+  border: 0.18rem solid transparent;
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, rgba(255, 192, 120, 0.98), rgba(234, 116, 85, 0.96))
+      padding-box;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 241, 226, 0.12),
+    0 0 18px rgba(234, 116, 85, 0.18);
+}
+
+.room-view__drawer--left::-webkit-scrollbar-thumb:hover {
+  background:
+    linear-gradient(180deg, rgba(255, 204, 136, 1), rgba(244, 150, 103, 0.98))
+      padding-box;
+}
+
+.room-view__drawer--left::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 .room-view__drawer--right {

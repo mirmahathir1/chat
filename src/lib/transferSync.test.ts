@@ -25,6 +25,7 @@ function createTransfer(overrides: Partial<FileTransfer> = {}): FileTransfer {
         size: 100,
         mimeType: 'text/plain',
         downloadUrl: 'blob:local',
+        previewUrl: 'blob:preview',
       },
     ],
     ...overrides,
@@ -32,7 +33,7 @@ function createTransfer(overrides: Partial<FileTransfer> = {}): FileTransfer {
 }
 
 describe('transferSync helpers', () => {
-  it('builds a completed-only history snapshot without download urls', () => {
+  it('builds a completed-only history snapshot without local file urls', () => {
     expect(
       buildTransferHistorySnapshot([
         createTransfer({
@@ -92,6 +93,7 @@ describe('transferSync helpers', () => {
                 size: 100,
                 mimeType: 'text/plain',
                 downloadUrl: 'blob:local',
+                previewUrl: 'blob:preview',
               },
             ],
           }),
@@ -129,6 +131,7 @@ describe('transferSync helpers', () => {
             size: 100,
             mimeType: 'text/plain',
             downloadUrl: 'blob:local',
+            previewUrl: 'blob:preview',
           },
         ],
       }),

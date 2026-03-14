@@ -1,39 +1,13 @@
 import { normalizeTransfer } from '@/lib/transferTransport'
-import type { FileTransfer, TransferDirection, TransferFile } from '@/types/chat'
-
-function stripDownloadUrls(files: TransferFile[]) {
-  return files.map((file) => {
-    const nextFile = { ...file }
-
-    delete nextFile.downloadUrl
-
-    return nextFile
-  })
-}
-
-function mergeTransferFiles(localFiles: TransferFile[], remoteFiles: TransferFile[]) {
-  const localFilesById = new Map(localFiles.map((file) => [file.id, file]))
-
-  return remoteFiles.map((file) => {
-    const localFile = localFilesById.get(file.id)
-
-    if (!localFile?.downloadUrl) {
-      return file
-    }
-
-    return {
-      ...file,
-      downloadUrl: localFile.downloadUrl,
-    }
-  })
-}
+import { mergeLocalFileUrls, stripLocalFileUrls } from '@/lib/transferFiles'
+import type { FileTransfer, TransferDirection } from '@/types/chat'
 
 export function buildTransferHistorySnapshot(transfers: FileTransfer[]) {
   return transfers
     .filter((transfer) => transfer.status === 'completed')
     .map((transfer) => ({
       ...transfer,
-      files: stripDownloadUrls(transfer.files),
+      files: stripLocalFileUrls(transfer.files),
     }))
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
 }
@@ -62,7 +36,7 @@ export function mergeSyncedTransfers(
       ...normalizeTransfer(localTransfer ?? remoteTransfer),
       ...normalizeTransfer(remoteTransfer),
       direction,
-      files: mergeTransferFiles(localTransfer?.files ?? [], remoteTransfer.files),
+      files: mergeLocalFileUrls(localTransfer?.files ?? [], remoteTransfer.files),
     }
   })
   const localOnlyTransfers = localTransfers.filter(

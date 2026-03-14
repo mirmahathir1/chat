@@ -1,6 +1,12 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { formatBytes, formatTransferSpeed } from '@/lib/fileTransfer'
+import {
+  getTransferFilePreviewKind,
+  isTransferFilePreviewable,
+  resolveTransferFilePreviewUrl,
+  type TransferFilePreviewKind,
+} from '@/lib/mediaPreview'
 import { getTransferTransportLabel } from '@/lib/transferTransport'
 import { splitTextWithLinks } from '@/lib/linkify'
 import { formatTimeLabel } from '@/lib/time'
@@ -14,6 +20,12 @@ import {
 } from '@/lib/uploadSelection'
 import { useNotificationStore } from '@/stores/notifications'
 import type { ChatMessage, FileTransfer } from '@/types/chat'
+
+interface ActiveMediaPreview {
+  kind: TransferFilePreviewKind
+  name: string
+  url: string
+}
 
 const props = defineProps<{
   draft: string
@@ -51,6 +63,7 @@ const pendingUploadSelection = ref<UploadSelection | null>(null)
 const uploadPromptMode = ref<'folder' | 'files' | null>(null)
 const isPreparingUpload = ref(false)
 const preparingUploadLabel = ref('')
+const activeMediaPreview = ref<ActiveMediaPreview | null>(null)
 const isUploadDisabled = computed(
   () => props.disabled || props.fileDisabled || isPreparingUpload.value
 )
@@ -83,6 +96,63 @@ function shouldShowTransferReplay(transfer: FileTransfer) {
 
 function shouldShowTransferSummary(transfer: FileTransfer) {
   return transfer.status !== 'cancelled' && transfer.status !== 'failed'
+}
+
+function getTransferFileUrl(file: FileTransfer['files'][number]) {
+  return resolveTransferFilePreviewUrl(file)
+}
+
+function openTransferFilePreview(file: FileTransfer['files'][number]) {
+  const kind = getTransferFilePreviewKind(file)
+  const url = getTransferFileUrl(file)
+
+  if (!kind || !url) {
+    return
+  }
+
+  activeMediaPreview.value = {
+    kind,
+    name: file.name,
+    url,
+  }
+}
+
+function closeTransferFilePreview() {
+  activeMediaPreview.value = null
+}
+
+function getTransferPreviewAriaLabel(file: FileTransfer['files'][number]) {
+  return `Open preview for ${file.name}`
+}
+
+function downloadFile(url: string, fileName: string) {
+  const downloadLink = document.createElement('a')
+
+  downloadLink.href = url
+  downloadLink.download = fileName
+  downloadLink.rel = 'noreferrer'
+  downloadLink.style.display = 'none'
+  document.body.appendChild(downloadLink)
+  downloadLink.click()
+  downloadLink.remove()
+}
+
+function downloadTransferFile(file: FileTransfer['files'][number]) {
+  const url = getTransferFileUrl(file)
+
+  if (!url) {
+    return
+  }
+
+  downloadFile(url, file.name)
+}
+
+function downloadActiveMediaPreview() {
+  if (!activeMediaPreview.value) {
+    return
+  }
+
+  downloadFile(activeMediaPreview.value.url, activeMediaPreview.value.name)
 }
 
 function updateTranscriptScrollState() {
@@ -320,6 +390,12 @@ function clearUploadPrompt() {
   uploadPromptMode.value = null
 }
 
+function handleWindowKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && activeMediaPreview.value) {
+    closeTransferFilePreview()
+  }
+}
+
 async function sendPendingUpload(mode: 'files' | 'zip') {
   const selection = pendingUploadSelection.value
 
@@ -406,6 +482,14 @@ watch(
     immediate: true,
   }
 )
+
+onMounted(() => {
+  window.addEventListener('keydown', handleWindowKeydown)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handleWindowKeydown)
+})
 </script>
 
 <template>
@@ -607,16 +691,72 @@ watch(
               </div>
               <ul class="chat-panel__transfer-files">
                 <li v-for="file in entry.item.files" :key="file.id">
-                  <span class="chat-panel__transfer-file-name">
-                    {{ file.name }}
-                  </span>
-                  <a
-                    v-if="file.downloadUrl"
-                    :href="file.downloadUrl"
-                    :download="file.name"
+                  <button
+                    v-if="isTransferFilePreviewable(file)"
+                    type="button"
+                    class="chat-panel__transfer-preview"
+                    :aria-label="getTransferPreviewAriaLabel(file)"
+                    @click="openTransferFilePreview(file)"
                   >
-                    Download
-                  </a>
+                    <img
+                      v-if="getTransferFilePreviewKind(file) === 'image'"
+                      :src="getTransferFileUrl(file) ?? undefined"
+                      :alt="file.name"
+                      loading="lazy"
+                    />
+                    <video
+                      v-else
+                      muted
+                      playsinline
+                      preload="metadata"
+                    >
+                      <source
+                        :src="getTransferFileUrl(file) ?? undefined"
+                        :type="file.mimeType"
+                      />
+                    </video>
+                    <span class="chat-panel__transfer-preview-badge">
+                      {{
+                        getTransferFilePreviewKind(file) === 'image'
+                          ? 'Image'
+                          : 'Video'
+                      }}
+                    </span>
+                  </button>
+                  <div class="chat-panel__transfer-file-row">
+                    <div class="chat-panel__transfer-file-details">
+                      <span class="chat-panel__transfer-file-name">
+                        {{ file.name }}
+                      </span>
+                      <div class="chat-panel__transfer-file-meta">
+                        <span>{{ formatBytes(file.size) }}</span>
+                        <span v-if="isTransferFilePreviewable(file)">
+                          Click preview to open
+                        </span>
+                      </div>
+                    </div>
+                    <button
+                      v-if="
+                        entry.item.status === 'completed' &&
+                        getTransferFileUrl(file)
+                      "
+                      type="button"
+                      class="secondary-button chat-panel__download-button chat-panel__download-button--icon"
+                      :aria-label="`Download ${file.name}`"
+                      @click="downloadTransferFile(file)"
+                    >
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path
+                          d="M12 4v10m0 0 4-4m-4 4-4-4M5 18h14"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                        />
+                      </svg>
+                    </button>
+                  </div>
                 </li>
               </ul>
               <Transition name="ui-fade" appear>
@@ -778,6 +918,71 @@ watch(
         </div>
       </div>
     </Transition>
+
+    <Teleport to="body">
+      <Transition name="ui-overlay" appear>
+        <div
+          v-if="activeMediaPreview"
+          class="chat-panel__media-backdrop"
+          @click.self="closeTransferFilePreview"
+        >
+          <div
+            class="panel chat-panel__media-modal"
+            role="dialog"
+            aria-modal="true"
+            :aria-label="activeMediaPreview.name"
+          >
+            <button
+              type="button"
+              class="secondary-button chat-panel__media-close"
+              aria-label="Close preview"
+              @click="closeTransferFilePreview"
+            >
+              Close
+            </button>
+            <div class="chat-panel__media-stage">
+              <img
+                v-if="activeMediaPreview.kind === 'image'"
+                :src="activeMediaPreview.url"
+                :alt="activeMediaPreview.name"
+              />
+              <video
+                v-else
+                :src="activeMediaPreview.url"
+                controls
+                autoplay
+                playsinline
+                preload="metadata"
+              />
+            </div>
+            <div class="chat-panel__media-footer">
+              <div class="chat-panel__media-copy">
+                <p class="eyebrow">Media preview</p>
+                <strong>{{ activeMediaPreview.name }}</strong>
+              </div>
+              <button
+                type="button"
+                class="secondary-button chat-panel__media-download"
+                :aria-label="`Download ${activeMediaPreview.name}`"
+                @click="downloadActiveMediaPreview"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path
+                    d="M12 4v10m0 0 4-4m-4 4-4-4M5 18h14"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                  />
+                </svg>
+                <span>Download</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
   </section>
 </template>
 
@@ -956,8 +1161,7 @@ h2 {
 }
 
 .chat-panel__transfer-meta,
-.chat-panel__transfer-summary,
-.chat-panel__transfer-files li {
+.chat-panel__transfer-summary {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1000,6 +1204,61 @@ h2 {
   font-size: 0.9rem;
 }
 
+.chat-panel__transfer-files li {
+  display: grid;
+  gap: 0.7rem;
+  padding: 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.chat-panel__transfer-preview {
+  position: relative;
+  display: block;
+  width: min(100%, 18rem);
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid rgba(242, 164, 99, 0.3);
+  border-radius: 1rem;
+  background: rgba(14, 10, 9, 0.92);
+  box-shadow: none;
+}
+
+.chat-panel__transfer-preview img,
+.chat-panel__transfer-preview video {
+  display: block;
+  width: 100%;
+  max-height: 14rem;
+  object-fit: cover;
+  background: rgba(10, 7, 6, 0.94);
+}
+
+.chat-panel__transfer-preview-badge {
+  position: absolute;
+  left: 0.75rem;
+  bottom: 0.75rem;
+  padding: 0.22rem 0.55rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  background: rgba(18, 13, 11, 0.88);
+  color: var(--text-main);
+  font-size: 0.72rem;
+}
+
+.chat-panel__transfer-file-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.chat-panel__transfer-file-details {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
 .chat-panel__transfer-file-name {
   flex: 1;
   min-width: 0;
@@ -1008,7 +1267,36 @@ h2 {
   word-break: break-word;
 }
 
-.chat-panel__transfer-files li a {
+.chat-panel__transfer-file-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.7rem;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.chat-panel__download-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.5rem;
+  padding: 0.6rem 0.85rem;
+  border-color: rgba(242, 164, 99, 0.26);
+}
+
+.chat-panel__download-button--icon {
+  width: 2.5rem;
+  min-width: 2.5rem;
+  padding: 0;
+}
+
+.chat-panel__download-button svg,
+.chat-panel__media-download svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.chat-panel__transfer-file-row > .chat-panel__download-button {
   flex-shrink: 0;
 }
 
@@ -1164,6 +1452,78 @@ h2 {
   flex: 1;
 }
 
+.chat-panel__media-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  background: rgba(8, 5, 4, 0.84);
+  backdrop-filter: blur(12px);
+}
+
+.chat-panel__media-modal {
+  width: min(100%, 68rem);
+  max-height: calc(100vh - 3rem);
+  display: grid;
+  gap: 1rem;
+  padding: 1rem;
+}
+
+.chat-panel__media-close {
+  justify-self: flex-end;
+}
+
+.chat-panel__media-stage {
+  display: grid;
+  place-items: center;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: 1.25rem;
+  background: rgba(12, 8, 7, 0.9);
+}
+
+.chat-panel__media-stage img,
+.chat-panel__media-stage video {
+  display: block;
+  max-width: 100%;
+  max-height: calc(100vh - 12rem);
+  object-fit: contain;
+}
+
+.chat-panel__media-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.chat-panel__media-copy {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.chat-panel__media-copy strong {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.chat-panel__media-download {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.75rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-main);
+  gap: 0.55rem;
+  box-shadow: none;
+}
+
 @keyframes chat-panel-history-spin {
   to {
     transform: rotate(360deg);
@@ -1173,7 +1533,8 @@ h2 {
 @media (max-width: 720px) {
   .chat-panel__transfer-meta,
   .chat-panel__transfer-summary,
-  .chat-panel__transfer-files li {
+  .chat-panel__transfer-file-row,
+  .chat-panel__media-footer {
     flex-direction: column;
     align-items: flex-start;
   }
@@ -1184,6 +1545,15 @@ h2 {
 
   .chat-panel__modal-actions {
     flex-direction: column;
+  }
+
+  .chat-panel__transfer-preview,
+  .chat-panel__media-modal {
+    width: 100%;
+  }
+
+  .chat-panel__media-backdrop {
+    padding: 1rem;
   }
 }
 </style>

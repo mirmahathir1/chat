@@ -36,6 +36,7 @@ import {
   hasReplayableFileSet,
   listTransfersToReplay,
 } from '@/lib/transferReplay'
+import { stripLocalFileUrls } from '@/lib/transferFiles'
 import {
   buildTransferHistorySnapshot,
   mergeSyncedTransfers,
@@ -1463,7 +1464,7 @@ export const useSignalingStore = defineStore('signaling', () => {
         id: localPeer.id,
         label: localPeer.label,
       },
-      files: transfer.files,
+      files: stripLocalFileUrls(transfer.files),
       totalBytes: transfer.totalBytes ?? 0,
       createdAt: transfer.createdAt,
     }
@@ -1737,7 +1738,7 @@ export const useSignalingStore = defineStore('signaling', () => {
           id: localPeer.id,
           label: localPeer.label,
         },
-        files: transfer.files,
+        files: stripLocalFileUrls(transfer.files),
         totalBytes: transfer.totalBytes ?? 0,
         createdAt: transfer.createdAt,
         relay: {

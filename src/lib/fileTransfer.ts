@@ -1,4 +1,5 @@
 import { createId } from '@/lib/id'
+import { createLocalTransferPreviewUrl } from '@/lib/mediaPreview'
 import type { TransferFile } from '@/types/chat'
 
 export const maxTransferFiles = 500
@@ -40,12 +41,13 @@ export function validateTransferFiles(files: File[]) {
   } satisfies TransferValidationResult
 }
 
-export function createTransferFiles(files: ArrayLike<Pick<File, 'name' | 'size' | 'type'>>) {
+export function createTransferFiles(files: ArrayLike<File>) {
   return Array.from(files).map((file) => ({
     id: createId('file'),
     name: file.name,
     size: file.size,
     mimeType: file.type || 'application/octet-stream',
+    previewUrl: createLocalTransferPreviewUrl(file),
   })) satisfies TransferFile[]
 }
 
