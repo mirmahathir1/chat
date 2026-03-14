@@ -1,25 +1,51 @@
 import { defineStore } from 'pinia'
 import { computed, ref, watch } from 'vue'
+import {
+  buildSystemMessage,
+  buildTextMessage,
+  failPendingMessagesForPeer as failPendingMessagesForPeerState,
+  markMessageStatus as markRoomMessageStatus,
+  maxChatMessageBytes,
+  upsertMessage as upsertRoomMessage,
+  validateChatBody,
+} from '@/domain/messaging/messages'
+import {
+  buildHostedRoomNotifications,
+  buildJoinRoomNotifications,
+  buildRoomName,
+} from '@/domain/room/metadata'
+import {
+  removeMember as removeRoomMember,
+  updateMemberConnectionState as updateRoomMemberConnectionState,
+  upsertMember as upsertRoomMember,
+} from '@/domain/room/members'
+import { appendPresenceEvent, buildPresenceEvent } from '@/domain/room/presence'
+import {
+  cancelTransfer as cancelTransferState,
+  completeTransfer as completeTransferState,
+  failTransfer as failTransferState,
+  failTransfersForPeer as failTransfersForPeerState,
+  normalizeTransfers,
+  setTransferTransport as setTransferTransportState,
+  updateTransferProgress as updateTransferProgressState,
+  upsertTransfer as upsertTransferState,
+} from '@/domain/transfers/state'
 import { hasConfiguredBackendRelay } from '@/lib/backendRelayClient'
 import { createTransferFiles, validateTransferFiles } from '@/lib/fileTransfer'
-import { createHumanReadableId, formatHumanReadableId } from '@/lib/humanId'
+import { createHumanReadableId } from '@/lib/humanId'
 import { createId } from '@/lib/id'
 import { buildShareUrl } from '@/lib/roomLink'
-import { normalizeTransfer } from '@/lib/transferTransport'
 import type {
   ChatMessage,
   FileTransfer,
   PeerIdentity,
   PresenceEvent,
-  RoomNotification,
   RoomSummary,
   TransferFile,
   TransferTransport,
 } from '@/types/chat'
 import { useNotificationStore } from '@/stores/notifications'
 import { useSessionStore } from '@/stores/session'
-
-export const maxChatMessageBytes = 2048
 
 interface DraftMessageResult {
   message: ChatMessage | null
@@ -32,104 +58,13 @@ interface DraftTransferResult {
   error: string | null
 }
 
-function buildSystemMessage(body: string, createdAt: string): ChatMessage {
-  return {
-    id: createId('message'),
-    kind: 'system',
-    senderId: 'system',
-    senderLabel: 'Room',
-    body,
-    createdAt,
-    status: 'sent',
-  }
-}
-
-function buildInitialNotifications(
-  host: PeerIdentity,
-  room: RoomSummary
-): RoomNotification[] {
-  return [
-    {
-      id: createId('notification'),
-      title: 'Hosted room ready',
-      detail:
-        'Hosted room is live. Scan the QR code from another device to open the join flow for this room.',
-      tone: 'success',
-      createdAt: room.createdAt,
-      seen: false,
-    },
-    {
-      id: createId('notification'),
-      title: 'Chat ready',
-      detail:
-        'Text chat is live. The host relays messages across the room through the signaling channel.',
-      tone: 'info',
-      createdAt: room.createdAt,
-      seen: false,
-    },
-    {
-      id: createId('notification'),
-      title: 'Share link is ready',
-      detail: `${host.label} is the current host for room ${room.id}.`,
-      tone: 'info',
-      createdAt: room.createdAt,
-      seen: false,
-    },
-  ]
-}
-
-function buildTextMessage(
-  sender: Pick<PeerIdentity, 'id' | 'label'>,
-  body: string,
-  createdAt: string,
-  status: ChatMessage['status'],
-  id = createId('message')
-): ChatMessage {
-  return {
-    id,
-    kind: 'text',
-    senderId: sender.id,
-    senderLabel: sender.label,
-    body,
-    createdAt,
-    status,
-  }
-}
-
-function validateChatBody(body: string) {
-  const trimmed = body.trim()
-
-  if (!trimmed) {
-    return {
-      body: null,
-      error: 'Messages cannot be empty.',
-    }
-  }
-
-  const messageBytes = new TextEncoder().encode(trimmed).length
-
-  if (messageBytes > maxChatMessageBytes) {
-    return {
-      body: null,
-      error: `Messages must stay under ${maxChatMessageBytes} bytes.`,
-    }
-  }
-
-  return {
-    body: trimmed,
-    error: null,
-  }
-}
-
-function buildRoomName(prefix: 'Hosted room' | 'Join room', roomId: string) {
-  return `${prefix} ${formatHumanReadableId(roomId)}`
-}
+export { maxChatMessageBytes }
 
 export const useRoomStore = defineStore('room', () => {
-  const room = ref<RoomSummary | null>(loadStoredRoom())
-  const members = ref<PeerIdentity[]>(loadStoredMembers())
-  const messages = ref<ChatMessage[]>(loadStoredMessages())
-  const presenceEvents = ref<PresenceEvent[]>(loadStoredPresenceEvents())
+  const room = ref<RoomSummary | null>(null)
+  const members = ref<PeerIdentity[]>([])
+  const messages = ref<ChatMessage[]>([])
+  const presenceEvents = ref<PresenceEvent[]>([])
   const transfers = ref<FileTransfer[]>([])
   const draftMessage = ref('')
   const preferBackendRelay = ref(false)
@@ -160,10 +95,6 @@ export const useRoomStore = defineStore('room', () => {
     return activeTransfer?.transport ?? 'webrtc'
   })
   const relayBackendConfigured = computed(() => hasConfiguredBackendRelay())
-
-  function persistRoomState() {
-    return
-  }
 
   function buildRoomShareUrl(roomId: string, hostPeerId: string) {
     return buildShareUrl(roomId, hostPeerId, preferBackendRelay.value)
@@ -205,20 +136,13 @@ export const useRoomStore = defineStore('room', () => {
       },
     ]
     presenceEvents.value = [
-      {
-        id: createId('presence'),
-        type: 'host-created',
-        peerId: host.id,
-        peerLabel: host.label,
-        createdAt: now,
-      },
+      buildPresenceEvent('host-created', host.id, host.label, now),
     ]
     transfers.value = []
     messages.value = []
     transfers.value = []
     draftMessage.value = ''
-    notificationStore.replaceAll(buildInitialNotifications(host, hostedRoom))
-    persistRoomState()
+    notificationStore.replaceAll(buildHostedRoomNotifications(host, hostedRoom))
 
     return hostedRoom.id
   }
@@ -259,37 +183,14 @@ export const useRoomStore = defineStore('room', () => {
       },
     ]
     presenceEvents.value = [
-      {
-        id: createId('presence'),
-        type: 'joined',
-        peerId: localPeer.id,
-        peerLabel: localPeer.label,
-        createdAt: now,
-      },
+      buildPresenceEvent('joined', localPeer.id, localPeer.label, now),
     ]
     messages.value = []
     transfers.value = []
     draftMessage.value = ''
-    notificationStore.replaceAll([
-      {
-        id: createId('notification'),
-        title: 'Join link loaded',
-        detail: `This browser is staged to join room ${roomId} through host ${hostPeerId}.`,
-        tone: 'success',
-        createdAt: now,
-        seen: false,
-      },
-      {
-        id: createId('notification'),
-        title: 'Connection pending',
-        detail:
-          'The scanned link is valid. This device will unlock room chat after the host connection is established.',
-        tone: 'info',
-        createdAt: now,
-        seen: false,
-      },
-    ])
-    persistRoomState()
+    notificationStore.replaceAll(
+      buildJoinRoomNotifications(roomId, hostPeerId, now)
+    )
   }
 
   function ensureHostedRoom(roomId: string) {
@@ -318,7 +219,6 @@ export const useRoomStore = defineStore('room', () => {
           }
         : member
     )
-    persistRoomState()
   }
 
   function updateRoomStatus(status: RoomSummary['status']) {
@@ -330,7 +230,6 @@ export const useRoomStore = defineStore('room', () => {
       ...room.value,
       status,
     }
-    persistRoomState()
   }
 
   function appendSystemMessage(body: string) {
@@ -342,7 +241,6 @@ export const useRoomStore = defineStore('room', () => {
       ...messages.value,
       buildSystemMessage(body, new Date().toISOString()),
     ]
-    persistRoomState()
   }
 
   function recordPresenceEvent(
@@ -351,47 +249,23 @@ export const useRoomStore = defineStore('room', () => {
     peerLabel: string,
     createdAt = new Date().toISOString()
   ) {
-    const event: PresenceEvent = {
-      id: createId('presence'),
-      type,
-      peerId,
-      peerLabel,
-      createdAt,
-    }
+    const event = buildPresenceEvent(type, peerId, peerLabel, createdAt)
 
-    presenceEvents.value = [...presenceEvents.value, event]
-    persistRoomState()
+    presenceEvents.value = appendPresenceEvent(presenceEvents.value, event)
 
     return event
   }
 
   function replaceMessages(nextMessages: ChatMessage[]) {
     messages.value = nextMessages
-    persistRoomState()
   }
 
   function replacePresenceEvents(nextPresenceEvents: PresenceEvent[]) {
     presenceEvents.value = nextPresenceEvents
-    persistRoomState()
   }
 
   function upsertTransfer(transfer: FileTransfer) {
-    const normalizedTransfer = normalizeTransfer(transfer)
-    const existingIndex = transfers.value.findIndex(
-      (currentTransfer) => currentTransfer.id === normalizedTransfer.id
-    )
-
-    if (existingIndex === -1) {
-      transfers.value = [normalizedTransfer, ...transfers.value].slice(0, 20)
-
-      return
-    }
-
-    transfers.value = transfers.value.map((currentTransfer, index) =>
-      index === existingIndex
-        ? normalizeTransfer({ ...currentTransfer, ...normalizedTransfer })
-        : currentTransfer
-    )
+    transfers.value = upsertTransferState(transfers.value, transfer)
   }
 
   function createOutgoingTransfer(selectedFiles: File[]): DraftTransferResult {
@@ -478,93 +352,29 @@ export const useRoomStore = defineStore('room', () => {
     status: FileTransfer['status'] = 'transferring',
     bytesPerSecond?: number
   ) {
-    const transfer = transfers.value.find(
-      (currentTransfer) => currentTransfer.id === transferId
-    )
-
-    if (!transfer) {
-      return
-    }
-
-    upsertTransfer({
-      ...transfer,
+    transfers.value = updateTransferProgressState(
+      transfers.value,
+      transferId,
+      progress,
       status,
-      progress: Math.max(0, Math.min(100, progress)),
-      bytesPerSecond:
-        status === 'transferring'
-          ? bytesPerSecond ?? transfer.bytesPerSecond
-          : undefined,
-      error: undefined,
-    })
+      bytesPerSecond
+    )
   }
 
   function completeTransfer(transferId: string, files?: TransferFile[]) {
-    const transfer = transfers.value.find(
-      (currentTransfer) => currentTransfer.id === transferId
-    )
-
-    if (!transfer) {
-      return
-    }
-
-    upsertTransfer({
-      ...transfer,
-      files: files ?? transfer.files,
-      status: 'completed',
-      progress: 100,
-      bytesPerSecond: undefined,
-      error: undefined,
-    })
+    transfers.value = completeTransferState(transfers.value, transferId, files)
   }
 
   function failTransfer(transferId: string, error: string) {
-    const transfer = transfers.value.find(
-      (currentTransfer) => currentTransfer.id === transferId
-    )
-
-    if (!transfer) {
-      return
-    }
-
-    upsertTransfer({
-      ...transfer,
-      status: 'failed',
-      bytesPerSecond: undefined,
-      error,
-    })
+    transfers.value = failTransferState(transfers.value, transferId, error)
   }
 
   function cancelTransfer(transferId: string) {
-    const transfer = transfers.value.find(
-      (currentTransfer) => currentTransfer.id === transferId
-    )
-
-    if (!transfer) {
-      return
-    }
-
-    upsertTransfer({
-      ...transfer,
-      status: 'cancelled',
-      progress: 0,
-      bytesPerSecond: undefined,
-      error: undefined,
-    })
+    transfers.value = cancelTransferState(transfers.value, transferId)
   }
 
   function failTransfersForPeer(peerId: string, error: string) {
-    transfers.value = transfers.value.map((transfer) => {
-      if (transfer.peerId !== peerId || transfer.status === 'completed') {
-        return transfer
-      }
-
-      return {
-        ...transfer,
-        status: 'failed',
-        bytesPerSecond: undefined,
-        error,
-      }
-    })
+    transfers.value = failTransfersForPeerState(transfers.value, peerId, error)
   }
 
   function resetTransfers() {
@@ -572,83 +382,50 @@ export const useRoomStore = defineStore('room', () => {
   }
 
   function replaceTransfers(nextTransfers: FileTransfer[]) {
-    transfers.value = nextTransfers.map(normalizeTransfer)
-    persistRoomState()
+    transfers.value = normalizeTransfers(nextTransfers)
   }
 
   function setPreferBackendRelay(enabled: boolean) {
     preferBackendRelay.value = enabled
     syncRoomShareUrl()
-    persistRoomState()
   }
 
   watch(preferBackendRelay, () => {
     syncRoomShareUrl()
-    persistRoomState()
   })
 
   function setTransferTransport(
     transferId: string,
     transport: TransferTransport
   ) {
-    const transfer = transfers.value.find(
-      (currentTransfer) => currentTransfer.id === transferId
+    transfers.value = setTransferTransportState(
+      transfers.value,
+      transferId,
+      transport
     )
-
-    if (!transfer) {
-      return
-    }
-
-    upsertTransfer({
-      ...transfer,
-      transport,
-    })
   }
 
   function upsertMember(member: PeerIdentity) {
-    const existingIndex = members.value.findIndex(
-      (currentMember) => currentMember.id === member.id
-    )
-
-    if (existingIndex === -1) {
-      members.value = [...members.value, member]
-      persistRoomState()
-
-      return
-    }
-
-    members.value = members.value.map((currentMember, index) =>
-      index === existingIndex ? { ...currentMember, ...member } : currentMember
-    )
-    persistRoomState()
+    members.value = upsertRoomMember(members.value, member)
   }
 
   function replaceMembers(nextMembers: PeerIdentity[]) {
     members.value = nextMembers
-    persistRoomState()
   }
 
   function removeMember(peerId: string) {
-    members.value = members.value.filter((member) => member.id !== peerId)
-    persistRoomState()
+    members.value = removeRoomMember(members.value, peerId)
   }
 
   function updateMemberConnectionState(
     peerId: string,
     connectionState: PeerIdentity['connectionState']
   ) {
-    const member = members.value.find(
-      (currentMember) => currentMember.id === peerId
+    members.value = updateRoomMemberConnectionState(
+      members.value,
+      peerId,
+      connectionState
     )
-
-    if (!member) {
-      return
-    }
-
-    upsertMember({
-      ...member,
-      connectionState,
-    })
   }
 
   function syncLocalPeer() {
@@ -695,9 +472,8 @@ export const useRoomStore = defineStore('room', () => {
       'pending'
     )
 
-    messages.value = [...messages.value, message]
+    messages.value = upsertRoomMessage(messages.value, message)
     draftMessage.value = ''
-    persistRoomState()
 
     return {
       message,
@@ -706,23 +482,7 @@ export const useRoomStore = defineStore('room', () => {
   }
 
   function upsertMessage(message: ChatMessage) {
-    const existingIndex = messages.value.findIndex(
-      (currentMessage) => currentMessage.id === message.id
-    )
-
-    if (existingIndex === -1) {
-      messages.value = [...messages.value, message]
-      persistRoomState()
-
-      return
-    }
-
-    messages.value = messages.value.map((currentMessage, index) =>
-      index === existingIndex
-        ? { ...currentMessage, ...message }
-        : currentMessage
-    )
-    persistRoomState()
+    messages.value = upsertRoomMessage(messages.value, message)
   }
 
   function markMessageStatus(
@@ -730,41 +490,16 @@ export const useRoomStore = defineStore('room', () => {
     status: ChatMessage['status'],
     fallbackMessage?: ChatMessage
   ) {
-    const existingMessage = messages.value.find(
-      (message) => message.id === messageId
-    )
-
-    if (!existingMessage && fallbackMessage) {
-      upsertMessage({
-        ...fallbackMessage,
-        status,
-      })
-
-      return
-    }
-
-    if (!existingMessage) {
-      return
-    }
-
-    upsertMessage({
-      ...existingMessage,
+    messages.value = markRoomMessageStatus(
+      messages.value,
+      messageId,
       status,
-    })
+      fallbackMessage
+    )
   }
 
   function failPendingMessagesForPeer(peerId: string) {
-    messages.value = messages.value.map((message) => {
-      if (message.senderId !== peerId || message.status !== 'pending') {
-        return message
-      }
-
-      return {
-        ...message,
-        status: 'failed',
-      }
-    })
-    persistRoomState()
+    messages.value = failPendingMessagesForPeerState(messages.value, peerId)
   }
 
   function updateDraftMessage(value: string) {
@@ -829,19 +564,3 @@ export const useRoomStore = defineStore('room', () => {
     clearRoom,
   }
 })
-
-function loadStoredRoom() {
-  return null
-}
-
-function loadStoredMembers() {
-  return []
-}
-
-function loadStoredMessages() {
-  return []
-}
-
-function loadStoredPresenceEvents() {
-  return []
-}

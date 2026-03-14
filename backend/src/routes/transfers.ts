@@ -4,11 +4,13 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Readable } from 'node:stream'
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web'
 import type { RelayConfig } from '../config.js'
+import { readJsonBody, sendJson } from '../http/json.js'
+import { normalizePathname } from '../http/pathname.js'
 import type { RelayLogger } from '../services/relay-logger.js'
-import type {
-  RelayFileDeleteRequest,
-  RelayTransferCancelRequest,
-} from '../types/relay.js'
+import {
+  parseRelayFileDeleteRequest,
+  parseRelayTransferCancelRequest,
+} from '../validators/transfers.js'
 
 interface TransfersRouteDeps {
   config: RelayConfig
@@ -61,7 +63,9 @@ export function createTransfersRouteHandler(
       return true
     }
 
-    const fileMatch = pathname.match(/^\/api\/transfers\/([^/]+)\/files\/([^/]+)$/)
+    const fileMatch = pathname.match(
+      /^\/api\/transfers\/([^/]+)\/files\/([^/]+)$/
+    )
 
     if (fileMatch && method === 'GET') {
       ensureBlobTokenConfigured()
@@ -80,7 +84,8 @@ export function createTransfersRouteHandler(
 
       if (!isRelayBlobPathname(transferId, fileId, blobPathname)) {
         sendJson(res, 400, {
-          error: 'The requested Blob pathname does not match this transfer file.',
+          error:
+            'The requested Blob pathname does not match this transfer file.',
         })
 
         return true
@@ -138,7 +143,8 @@ export function createTransfersRouteHandler(
 
       if (!isRelayBlobPathname(transferId, fileId, parsed.value.pathname)) {
         sendJson(res, 400, {
-          error: 'The acknowledged Blob pathname does not match this transfer file.',
+          error:
+            'The acknowledged Blob pathname does not match this transfer file.',
         })
 
         return true
@@ -260,157 +266,4 @@ async function streamToNodeResponse(
     res.on('finish', resolve)
     readable.pipe(res)
   })
-}
-
-function parseRelayFileDeleteRequest(
-  value: unknown
-):
-  | {
-      ok: true
-      value: RelayFileDeleteRequest
-    }
-  | {
-      error: string
-      ok: false
-    } {
-  if (!value || typeof value !== 'object') {
-    return {
-      error: 'Relay file acknowledgement must be a JSON object.',
-      ok: false,
-    }
-  }
-
-  const pathname = (value as { pathname?: unknown }).pathname
-
-  if (typeof pathname !== 'string' || pathname.trim() === '') {
-    return {
-      error: 'Relay file acknowledgement must include a pathname.',
-      ok: false,
-    }
-  }
-
-  return {
-    ok: true,
-    value: {
-      pathname: pathname.trim(),
-    },
-  }
-}
-
-function parseRelayTransferCancelRequest(
-  value: unknown
-):
-  | {
-      ok: true
-      value: Required<Pick<RelayTransferCancelRequest, 'pathnames'>> &
-        RelayTransferCancelRequest
-    }
-  | {
-      error: string
-      ok: false
-    } {
-  if (!value || typeof value !== 'object') {
-    return {
-      error: 'Relay transfer cancellation must be a JSON object.',
-      ok: false,
-    }
-  }
-
-  const pathnames = (value as { pathnames?: unknown }).pathnames
-  const peerId = (value as { peerId?: unknown }).peerId
-  const reason = (value as { reason?: unknown }).reason
-
-  if (
-    pathnames !== undefined &&
-    (!Array.isArray(pathnames) ||
-      pathnames.some(
-        (pathname) => typeof pathname !== 'string' || pathname.trim() === ''
-      ))
-  ) {
-    return {
-      error: 'pathnames must be an array of non-empty strings when provided.',
-      ok: false,
-    }
-  }
-
-  if (
-    peerId !== undefined &&
-    (typeof peerId !== 'string' || peerId.trim() === '')
-  ) {
-    return {
-      error: 'peerId must be a non-empty string when provided.',
-      ok: false,
-    }
-  }
-
-  if (
-    reason !== undefined &&
-    reason !== null &&
-    (typeof reason !== 'string' || reason.trim() === '')
-  ) {
-    return {
-      error: 'reason must be a non-empty string when provided.',
-      ok: false,
-    }
-  }
-
-  return {
-    ok: true,
-    value: {
-      pathnames: (pathnames ?? []).map((pathname) => pathname.trim()),
-      peerId: typeof peerId === 'string' ? peerId.trim() : undefined,
-      reason: typeof reason === 'string' ? reason.trim() : undefined,
-    },
-  }
-}
-
-async function readJsonBody(req: IncomingMessage, maxBytes: number) {
-  const body = await readBufferBody(req, maxBytes)
-
-  if (body.byteLength === 0) {
-    return {}
-  }
-
-  return JSON.parse(body.toString('utf8')) as unknown
-}
-
-async function readBufferBody(req: IncomingMessage, maxBytes: number) {
-  const chunks: Buffer[] = []
-  let totalBytes = 0
-
-  for await (const chunk of req) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
-
-    totalBytes += buffer.byteLength
-
-    if (totalBytes > maxBytes) {
-      throw new Error(`Request body exceeded ${maxBytes} bytes.`)
-    }
-
-    chunks.push(buffer)
-  }
-
-  return Buffer.concat(chunks, totalBytes)
-}
-
-function normalizePathname(pathname: string) {
-  if (pathname === '/') {
-    return pathname
-  }
-
-  return pathname.replace(/\/+$/, '')
-}
-
-function sendJson(
-  res: ServerResponse<IncomingMessage>,
-  statusCode: number,
-  payload: unknown
-) {
-  const body = Buffer.from(JSON.stringify(payload))
-
-  res.writeHead(statusCode, {
-    'Content-Length': body.byteLength,
-    'Content-Type': 'application/json; charset=utf-8',
-  })
-  res.end(body)
 }

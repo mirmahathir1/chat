@@ -1,6 +1,31 @@
 import Peer, { PeerErrorType, type DataConnection } from 'peerjs'
 import { defineStore } from 'pinia'
 import { computed, markRaw, ref, shallowRef, watch } from 'vue'
+import { buildTextMessage, validateChatBody } from '@/domain/messaging/messages'
+import {
+  maxRetryAttempts,
+  minTransferSpeedSampleWindowMs,
+  relayOfferAckTimeoutMs,
+} from '@/domain/signaling/constants'
+import {
+  isSignalingMessage,
+  type ChatBroadcastMessage,
+  type ChatRejectedMessage,
+  type ChatSendMessage,
+  type FileChunkMessage,
+  type FileCompleteMessage,
+  type FileOfferAckMessage,
+  type FileOfferMessage,
+  type HostWelcomeMessage,
+  type MemberHelloMessage,
+  type RelayPreferenceMessage,
+  type RelayTransferOfferMessage,
+  type RelayTransferUploadedFileMessage,
+  type ReplayTransferRequestMessage,
+  type ReplayTransferUnavailableMessage,
+  type SignalingMessage,
+  type TransferCancelMessage,
+} from '@/domain/signaling/protocol'
 import { createBackendRelayClient } from '@/lib/backendRelayClient'
 import { readFileInChunks } from '@/lib/fileTransfer'
 import { pollBackendRelay } from '@/lib/backendRelayPolling'
@@ -24,176 +49,17 @@ import {
 } from '@/lib/transferStorage'
 import { useNotificationStore } from '@/stores/notifications'
 import { useNetworkActivityStore } from '@/stores/networkActivity'
-import { maxChatMessageBytes, useRoomStore } from '@/stores/room'
+import { useRoomStore } from '@/stores/room'
 import { useSessionStore } from '@/stores/session'
 import type {
   ChatMessage,
   FileTransfer,
   LocalRoomMode,
-  PeerIdentity,
   PresenceEvent,
   PresenceEventType,
   SignalingState,
   TransferFile,
 } from '@/types/chat'
-
-interface MemberHelloMessage {
-  type: 'member-hello'
-  preferBackendRelay: boolean
-  roomId: string
-  peer: Pick<PeerIdentity, 'id' | 'label' | 'joinedAt'>
-}
-
-interface HostWelcomeMessage {
-  type: 'host-welcome'
-  roomId: string
-  preferBackendRelay: boolean
-  host: Pick<PeerIdentity, 'id' | 'label' | 'joinedAt'>
-  members: PeerIdentity[]
-  presenceEvents: PresenceEvent[]
-  messages: ChatMessage[]
-  transfers?: FileTransfer[]
-}
-
-interface RoomSyncMessage {
-  type: 'room-sync'
-  preferBackendRelay: boolean
-  roomId: string
-  members: PeerIdentity[]
-  presenceEvents: PresenceEvent[]
-}
-
-interface RelayPreferenceMessage {
-  type: 'relay-preference'
-  peerId: string
-  preferBackendRelay: boolean
-  roomId: string
-}
-
-interface PresenceBroadcastMessage {
-  type: 'presence-event'
-  roomId: string
-  event: Omit<PresenceEvent, 'id'>
-}
-
-interface ChatSendMessage {
-  type: 'chat-send'
-  roomId: string
-  message: Pick<ChatMessage, 'id' | 'body' | 'createdAt'>
-}
-
-interface ChatBroadcastMessage {
-  type: 'chat-broadcast'
-  roomId: string
-  message: ChatMessage
-}
-
-interface ChatRejectedMessage {
-  type: 'chat-rejected'
-  roomId: string
-  messageId: string
-  reason: string
-}
-
-interface FileOfferMessage {
-  type: 'file-offer'
-  roomId: string
-  transferId: string
-  sender: Pick<PeerIdentity, 'id' | 'label'>
-  files: TransferFile[]
-  totalBytes: number
-  createdAt?: string
-  targetPeerId?: string
-}
-
-interface FileOfferAckMessage {
-  type: 'file-offer-ack'
-  roomId: string
-  transferId: string
-  peerId: string
-  targetPeerId: string
-}
-
-interface FileChunkMessage {
-  type: 'file-chunk'
-  roomId: string
-  transferId: string
-  fileId: string
-  chunkIndex: number
-  totalChunks: number
-  data: ArrayBuffer
-  targetPeerId?: string
-}
-
-interface RelayTransferUploadedFileMessage {
-  fileId: string
-  pathname: string
-}
-
-interface RelayTransferOfferMessage {
-  type: 'relay-transfer-offer'
-  roomId: string
-  transferId: string
-  sender: Pick<PeerIdentity, 'id' | 'label'>
-  files: TransferFile[]
-  totalBytes: number
-  createdAt?: string
-  relay: {
-    files: RelayTransferUploadedFileMessage[]
-  }
-  targetPeerId: string
-}
-
-interface FileCompleteMessage {
-  type: 'file-complete'
-  roomId: string
-  transferId: string
-  targetPeerId?: string
-}
-
-interface ReplayTransferRequestMessage {
-  type: 'replay-transfer'
-  roomId: string
-  transferId: string
-  recipientPeerId: string
-}
-
-interface ReplayTransferUnavailableMessage {
-  type: 'replay-transfer-unavailable'
-  roomId: string
-  transferId: string
-  recipientPeerId: string
-  reason: string
-}
-
-interface TransferCancelMessage {
-  type: 'transfer-cancel'
-  roomId: string
-  transferId: string
-  targetPeerId?: string
-}
-
-type SignalingMessage =
-  | MemberHelloMessage
-  | HostWelcomeMessage
-  | RoomSyncMessage
-  | PresenceBroadcastMessage
-  | ChatSendMessage
-  | ChatBroadcastMessage
-  | ChatRejectedMessage
-  | RelayPreferenceMessage
-  | FileOfferMessage
-  | FileOfferAckMessage
-  | FileChunkMessage
-  | RelayTransferOfferMessage
-  | FileCompleteMessage
-  | ReplayTransferRequestMessage
-  | ReplayTransferUnavailableMessage
-  | TransferCancelMessage
-
-const maxRetryAttempts = 3
-const relayOfferAckTimeoutMs = 4_000
-const minTransferSpeedSampleWindowMs = 200
 type OutgoingTransferMode = 'live' | 'replay'
 
 interface IncomingFileBuffer {
@@ -275,7 +141,9 @@ export const useSignalingStore = defineStore('signaling', () => {
   const pendingHistoryTransferIds = ref<string[]>([])
   const hasReceivedHistorySnapshot = ref(false)
   const backendRoomEventCursor = ref(0)
-  const backendRoomEventPollController = shallowRef<AbortController | null>(null)
+  const backendRoomEventPollController = shallowRef<AbortController | null>(
+    null
+  )
 
   const sessionStore = useSessionStore()
   const roomStore = useRoomStore()
@@ -286,7 +154,9 @@ export const useSignalingStore = defineStore('signaling', () => {
   const isReady = computed(
     () => state.value === 'listening' || state.value === 'connected'
   )
-  const isBackendRelayConfigured = computed(() => backendRelayClient.isConfigured)
+  const isBackendRelayConfigured = computed(
+    () => backendRelayClient.isConfigured
+  )
   // eslint-disable-next-line no-useless-assignment
   const backendRoomRelayKey = computed(() => {
     const roomId = activeRoomId.value ?? roomStore.room?.id
@@ -568,10 +438,7 @@ export const useSignalingStore = defineStore('signaling', () => {
     })
   }
 
-  function measureTransferSpeed(
-    transferId: string,
-    transferredBytes: number
-  ) {
+  function measureTransferSpeed(transferId: string, transferredBytes: number) {
     const now = performance.now()
     const previousSample = transferSpeedSamples.get(transferId)
 
@@ -680,7 +547,7 @@ export const useSignalingStore = defineStore('signaling', () => {
 
     const recipientPeerIds = resolveConnectedRecipientPeerIds(localPeerId)
 
-    return recipientPeerIds.length === 1 ? recipientPeerIds[0] ?? null : null
+    return recipientPeerIds.length === 1 ? (recipientPeerIds[0] ?? null) : null
   }
 
   function getBackendRelayAvailabilityError(localPeerId: string) {
@@ -1389,7 +1256,8 @@ export const useSignalingStore = defineStore('signaling', () => {
         roomStore.markMessageStatus(draftResult.message.id, 'failed')
         notificationStore.pushNotification({
           title: 'Backend relay unavailable',
-          detail: 'Configure the backend relay before sending chat in relay mode.',
+          detail:
+            'Configure the backend relay before sending chat in relay mode.',
           tone: 'warning',
         })
 
@@ -1522,8 +1390,9 @@ export const useSignalingStore = defineStore('signaling', () => {
     roomStore.updateTransferProgress(transfer.id, 0)
 
     if (roomStore.preferBackendRelay) {
-      const backendRelayAvailabilityError =
-        getBackendRelayAvailabilityError(localPeer.id)
+      const backendRelayAvailabilityError = getBackendRelayAvailabilityError(
+        localPeer.id
+      )
 
       if (backendRelayAvailabilityError) {
         roomStore.failTransfer(transfer.id, backendRelayAvailabilityError)
@@ -2160,8 +2029,7 @@ export const useSignalingStore = defineStore('signaling', () => {
       typeof connection.metadata?.peerId === 'string'
         ? connection.metadata.peerId
         : connection.peer
-    const preferredRelay =
-      connection.metadata?.preferBackendRelay === true
+    const preferredRelay = connection.metadata?.preferBackendRelay === true
 
     let didDisconnect = false
     let didActivate = false
@@ -2472,41 +2340,29 @@ export const useSignalingStore = defineStore('signaling', () => {
       return
     }
 
-    const trimmedBody = payload.message.body.trim()
+    const validation = validateChatBody(payload.message.body)
 
-    if (!trimmedBody) {
+    if (!validation.body) {
       connection.send({
         type: 'chat-rejected',
         roomId: room.id,
         messageId: payload.message.id,
-        reason: 'Messages cannot be empty.',
+        reason: validation.error ?? 'Message validation failed.',
       } satisfies ChatRejectedMessage)
 
       return
     }
 
-    const messageBytes = new TextEncoder().encode(trimmedBody).length
-
-    if (messageBytes > maxChatMessageBytes) {
-      connection.send({
-        type: 'chat-rejected',
-        roomId: room.id,
-        messageId: payload.message.id,
-        reason: `Messages must stay under ${maxChatMessageBytes} bytes.`,
-      } satisfies ChatRejectedMessage)
-
-      return
-    }
-
-    const relayMessage: ChatMessage = {
-      id: payload.message.id,
-      kind: 'text',
-      senderId: peerId,
-      senderLabel: label,
-      body: trimmedBody,
-      createdAt: payload.message.createdAt,
-      status: 'sent',
-    }
+    const relayMessage = buildTextMessage(
+      {
+        id: peerId,
+        label,
+      },
+      validation.body,
+      payload.message.createdAt,
+      'sent',
+      payload.message.id
+    )
 
     roomStore.upsertMessage(relayMessage)
     broadcastChatMessage(relayMessage)
@@ -2541,7 +2397,10 @@ export const useSignalingStore = defineStore('signaling', () => {
   }
 
   function ensureIncomingTransfer(
-    input: Pick<FileOfferMessage, 'transferId' | 'sender' | 'files' | 'totalBytes' | 'createdAt'>
+    input: Pick<
+      FileOfferMessage,
+      'transferId' | 'sender' | 'files' | 'totalBytes' | 'createdAt'
+    >
   ) {
     if (cancelledIncomingTransfers.has(input.transferId)) {
       return false
@@ -2816,7 +2675,9 @@ export const useSignalingStore = defineStore('signaling', () => {
     }
   }
 
-  function handleIncomingRelayTransferOffer(message: RelayTransferOfferMessage) {
+  function handleIncomingRelayTransferOffer(
+    message: RelayTransferOfferMessage
+  ) {
     if (
       !ensureIncomingTransfer({
         transferId: message.transferId,
@@ -2938,7 +2799,9 @@ export const useSignalingStore = defineStore('signaling', () => {
       finishIncomingTransferActivity(transferId)
       await cancelIncomingRelayTransferSession(
         transferId,
-        error instanceof Error ? error.message : 'Backend relay download failed.'
+        error instanceof Error
+          ? error.message
+          : 'Backend relay download failed.'
       )
       await disposeIncomingTransfer(transfer)
     }
@@ -3456,15 +3319,6 @@ export const useSignalingStore = defineStore('signaling', () => {
     }
   )
 })
-
-function isSignalingMessage(value: unknown): value is SignalingMessage {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    'type' in value &&
-    (value as { type?: unknown }).type !== undefined
-  )
-}
 
 function buildPresenceNotification(
   eventType: PresenceEventType,

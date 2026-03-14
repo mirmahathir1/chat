@@ -1,6 +1,7 @@
 import { fileURLToPath, URL } from 'node:url'
 import vue from '@vitejs/plugin-vue'
-import { defineConfig, loadEnv } from 'vite'
+import { loadEnv } from 'vite'
+import { defineConfig } from 'vitest/config'
 
 function normalizeBasePath(value: string | undefined) {
   if (!value) {
@@ -89,6 +90,10 @@ export default defineConfig(({ mode }) => {
             protocol: 'ws',
           }
         : undefined,
+    },
+    test: {
+      environment: 'node',
+      include: ['src/**/*.test.ts'],
     },
   }
 })

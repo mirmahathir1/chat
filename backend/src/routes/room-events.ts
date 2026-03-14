@@ -1,10 +1,9 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { readJsonBody, sendJson } from '../http/json.js'
+import { normalizePathname } from '../http/pathname.js'
 import type { RelayRoomEventStore } from '../services/room-event-store.js'
 import type { RelayLogger } from '../services/relay-logger.js'
-import type {
-  CreateRelayRoomEventRequest,
-  RelayRoomEventMessage,
-} from '../types/room-event.js'
+import { parseCreateRoomEventRequest } from '../validators/room-events.js'
 
 interface RoomEventsRouteDeps {
   logger: RelayLogger
@@ -24,7 +23,9 @@ export function createRoomEventsRouteHandler(
     const url = new URL(req.url ?? '/', 'http://localhost')
     const pathname = normalizePathname(url.pathname)
 
-    const cursorMatch = pathname.match(/^\/api\/rooms\/([^/]+)\/events\/cursor$/)
+    const cursorMatch = pathname.match(
+      /^\/api\/rooms\/([^/]+)\/events\/cursor$/
+    )
 
     if (method === 'GET' && cursorMatch) {
       const roomId = cursorMatch[1]!
@@ -124,110 +125,4 @@ export function createRoomEventsRouteHandler(
 
     return false
   }
-}
-
-function parseCreateRoomEventRequest(
-  value: unknown
-):
-  | { ok: true; value: CreateRelayRoomEventRequest }
-  | { error: string; ok: false } {
-  if (!value || typeof value !== 'object') {
-    return {
-      error: 'Room event request must be a JSON object.',
-      ok: false,
-    }
-  }
-
-  const message = (value as { message?: unknown }).message
-  const senderPeerId = (value as { senderPeerId?: unknown }).senderPeerId
-  const targetPeerId = (value as { targetPeerId?: unknown }).targetPeerId
-
-  if (
-    !message ||
-    typeof message !== 'object' ||
-    typeof (message as { type?: unknown }).type !== 'string'
-  ) {
-    return {
-      error: 'Room event requests must include a message object with a type.',
-      ok: false,
-    }
-  }
-
-  if (typeof senderPeerId !== 'string' || senderPeerId.trim() === '') {
-    return {
-      error: 'Room event requests must include a senderPeerId.',
-      ok: false,
-    }
-  }
-
-  if (
-    targetPeerId !== undefined &&
-    targetPeerId !== null &&
-    (typeof targetPeerId !== 'string' || targetPeerId.trim() === '')
-  ) {
-    return {
-      error: 'targetPeerId must be a non-empty string when provided.',
-      ok: false,
-    }
-  }
-
-  return {
-    ok: true,
-    value: {
-      message: message as RelayRoomEventMessage,
-      senderPeerId,
-      targetPeerId: targetPeerId ?? null,
-    },
-  }
-}
-
-async function readJsonBody(req: IncomingMessage, maxBytes: number) {
-  const body = await readBufferBody(req, maxBytes)
-
-  if (body.byteLength === 0) {
-    return {}
-  }
-
-  return JSON.parse(body.toString('utf8')) as unknown
-}
-
-async function readBufferBody(req: IncomingMessage, maxBytes: number) {
-  const chunks: Buffer[] = []
-  let totalBytes = 0
-
-  for await (const chunk of req) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
-
-    totalBytes += buffer.byteLength
-
-    if (totalBytes > maxBytes) {
-      throw new Error(`Request body exceeded ${maxBytes} bytes.`)
-    }
-
-    chunks.push(buffer)
-  }
-
-  return Buffer.concat(chunks, totalBytes)
-}
-
-function normalizePathname(pathname: string) {
-  if (pathname === '/') {
-    return pathname
-  }
-
-  return pathname.replace(/\/+$/, '')
-}
-
-function sendJson(
-  res: ServerResponse<IncomingMessage>,
-  statusCode: number,
-  payload: unknown
-) {
-  const body = Buffer.from(JSON.stringify(payload))
-
-  res.writeHead(statusCode, {
-    'Content-Length': body.byteLength,
-    'Content-Type': 'application/json; charset=utf-8',
-  })
-  res.end(body)
 }

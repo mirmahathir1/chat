@@ -11,6 +11,9 @@ import {
 } from './cypress/secondary-browser.js'
 
 export default defineConfig({
+  env: {
+    relayBlobConfigured: Boolean(process.env.BLOB_READ_WRITE_TOKEN?.trim()),
+  },
   e2e: {
     baseUrl: process.env.CYPRESS_BASE_URL ?? 'http://localhost:4173',
     specPattern: 'cypress/e2e/**/*.cy.ts',

@@ -1,28 +1,10 @@
 <script setup lang="ts">
-import { storeToRefs } from 'pinia'
-import { computed, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
 import ChatPanel from '@/components/chat/ChatPanel.vue'
 import NotificationPanel from '@/components/notifications/NotificationPanel.vue'
 import MembersPanel from '@/components/room/MembersPanel.vue'
 import SharePanel from '@/components/room/SharePanel.vue'
-import type { PreparedUpload } from '@/lib/uploadSelection'
-import {
-  getHostPeerIdFromQuery,
-  getTransferTransportFromQuery,
-  isGeneratedId,
-} from '@/lib/roomLink'
-import { useNotificationStore } from '@/stores/notifications'
-import { useRoomStore } from '@/stores/room'
-import { useSessionStore } from '@/stores/session'
-import { useSignalingStore } from '@/stores/signaling'
-
-const route = useRoute()
-const router = useRouter()
-const sessionStore = useSessionStore()
-const roomStore = useRoomStore()
-const notificationStore = useNotificationStore()
-const signalingStore = useSignalingStore()
+import { useRoomLayoutState } from '@/composables/room/useRoomLayoutState'
+import { useRoomRouteBootstrap } from '@/composables/room/useRoomRouteBootstrap'
 
 const {
   room,
@@ -30,212 +12,39 @@ const {
   messages,
   transfers,
   draftMessage,
-  isJoinView,
-  connectedMemberCount,
-  preferBackendRelay,
-} = storeToRefs(roomStore)
-const { items: notifications } = storeToRefs(notificationStore)
-const {
-  state: signalingState,
+  notifications,
   errorMessage,
   retryCount,
   isHistoryLoading,
-} = storeToRefs(signalingStore)
-const roomIdParam = computed(() =>
-  typeof route.params.roomId === 'string' ? route.params.roomId : null
-)
-const hasJoinQuery = computed(() =>
-  Object.prototype.hasOwnProperty.call(route.query, 'host')
-)
-const joinHostPeerId = computed(() => getHostPeerIdFromQuery(route.query.host))
-const inviteTransport = computed(() =>
-  getTransferTransportFromQuery(route.query.transport)
-)
-const isLeftDrawerOpen = ref(false)
-const isRightDrawerOpen = ref(false)
-const joinLinkIssue = computed(() => {
-  if (!hasJoinQuery.value) {
-    return null
-  }
+  joinLinkIssue,
+  connectedMemberCount,
+  isChatDisabled,
+  isFileShareDisabled,
+  joinStateTitle,
+  joinStateDetail,
+  canRetryJoin,
+  showJoinBanner,
+  showHostDisconnectedModal,
+  hostDisconnectedDetail,
+  localPeerId,
+  localPeerLabel,
+  goBack,
+  retryConnection,
+  updateDraftMessage,
+  sendDraftMessage,
+  cancelTransfer,
+  downloadTransfer,
+  sendFiles,
+} = useRoomRouteBootstrap()
 
-  if (!roomIdParam.value || !isGeneratedId(roomIdParam.value, 'room')) {
-    return 'This room link is invalid or incomplete.'
-  }
-
-  if (!joinHostPeerId.value || !isGeneratedId(joinHostPeerId.value, 'peer')) {
-    return 'This invite is missing a valid host peer ID.'
-  }
-
-  return null
-})
-const isChatDisabled = computed(
-  () => isJoinView.value && signalingState.value !== 'connected'
-)
-const isFileShareDisabled = computed(
-  () =>
-    isChatDisabled.value || (isJoinView.value && connectedMemberCount.value < 2)
-)
-const joinStateTitle = computed(() => {
-  switch (signalingState.value) {
-    case 'starting':
-      return 'Preparing the room session.'
-    case 'connecting':
-      return 'Connecting to the host.'
-    case 'retrying':
-      return 'Trying the host again.'
-    case 'connected':
-      return ''
-    case 'disconnected':
-      return 'This device is disconnected from the host.'
-    case 'error':
-      return 'The room connection hit an error.'
-    default:
-      return 'Waiting to start the join flow.'
-  }
-})
-const joinStateDetail = computed(() => {
-  if (joinLinkIssue.value) {
-    return joinLinkIssue.value
-  }
-
-  if (errorMessage.value) {
-    return errorMessage.value
-  }
-
-  switch (signalingState.value) {
-    case 'starting':
-      return 'Preparing the local peer identity and signaling client.'
-    case 'connecting':
-      return 'PeerJS is contacting the host and opening the room channel.'
-    case 'retrying':
-      return 'The host did not answer yet. Automatic reconnect is still in progress.'
-    case 'connected':
-      return ''
-    case 'disconnected':
-      return 'The host channel is down. Retry manually or verify that the host is still online.'
-    default:
-      return 'The room link has been decoded correctly and is ready to connect.'
-  }
-})
-const canRetryJoin = computed(
-  () =>
-    !joinLinkIssue.value &&
-    !(
-      room.value?.localMode === 'join' && room.value.status === 'disconnected'
-    ) &&
-    (signalingState.value === 'connecting' ||
-      signalingState.value === 'retrying' ||
-      signalingState.value === 'disconnected' ||
-      signalingState.value === 'error')
-)
-const showJoinBanner = computed(
-  () => hasJoinQuery.value && signalingState.value !== 'connected'
-)
-const showHostDisconnectedModal = computed(
-  () => room.value?.localMode === 'join' && room.value.status === 'disconnected'
-)
-const hostDisconnectedDetail = computed(
-  () => errorMessage.value ?? 'The host is no longer connected to this room.'
-)
-const localPeerLabel = computed(() => sessionStore.peer?.label ?? 'Unassigned')
-
-watch(
-  [roomIdParam, joinLinkIssue, joinHostPeerId, inviteTransport],
-  ([roomId, linkIssue, hostPeerId, nextInviteTransport]) => {
-    if (!roomId || linkIssue) {
-      return
-    }
-
-    if (hostPeerId) {
-      roomStore.prepareJoinRoom(
-        roomId,
-        hostPeerId,
-        nextInviteTransport === null
-          ? preferBackendRelay.value
-          : nextInviteTransport === 'backend-relay'
-      )
-      signalingStore.ensureJoiner(roomId, hostPeerId)
-
-      return
-    }
-
-    sessionStore.ensureSession('host')
-    roomStore.ensureHostedRoom(roomId)
-    signalingStore.ensureHost(roomId)
-  },
-  {
-    immediate: true,
-  }
-)
-
-watch(
-  () => route.fullPath,
-  () => {
-    isLeftDrawerOpen.value = false
-    isRightDrawerOpen.value = false
-  }
-)
-
-watch(showHostDisconnectedModal, (isVisible) => {
-  if (!isVisible) {
-    return
-  }
-
-  isLeftDrawerOpen.value = false
-  isRightDrawerOpen.value = false
-})
-
-function goBack() {
-  signalingStore.destroyPeer()
-  roomStore.clearRoom()
-  sessionStore.clearSession()
-  notificationStore.clearAll()
-  router.push({
-    name: 'home',
-  })
-}
-
-function retryConnection() {
-  signalingStore.retryJoinConnection()
-}
-
-function openLeftDrawer() {
-  isRightDrawerOpen.value = false
-  isLeftDrawerOpen.value = true
-}
-
-function closeLeftDrawer() {
-  isLeftDrawerOpen.value = false
-}
-
-function openRightDrawer() {
-  isLeftDrawerOpen.value = false
-  isRightDrawerOpen.value = true
-}
-
-function closeRightDrawer() {
-  isRightDrawerOpen.value = false
-}
-
-function sendDraftMessage() {
-  signalingStore.sendDraftMessage()
-}
-
-function cancelTransfer(transferId: string) {
-  signalingStore.cancelTransfer(transferId)
-}
-
-function downloadTransfer(transferId: string) {
-  signalingStore.requestTransferReplay(transferId)
-}
-
-async function sendFiles(upload: PreparedUpload) {
-  try {
-    await signalingStore.sendFiles(upload.files)
-  } finally {
-    await upload.cleanup?.()
-  }
-}
+const {
+  isLeftDrawerOpen,
+  isRightDrawerOpen,
+  openLeftDrawer,
+  closeLeftDrawer,
+  openRightDrawer,
+  closeRightDrawer,
+} = useRoomLayoutState(showHostDisconnectedModal)
 </script>
 
 <template>
@@ -298,11 +107,11 @@ async function sendFiles(upload: PreparedUpload) {
         :messages="messages"
         :transfers="transfers"
         :draft="draftMessage"
-        :local-peer-id="sessionStore.peer?.id"
+        :local-peer-id="localPeerId"
         :history-loading="isHistoryLoading"
         :disabled="isChatDisabled"
         :file-disabled="isFileShareDisabled"
-        @update:draft="roomStore.updateDraftMessage"
+        @update:draft="updateDraftMessage"
         @send="sendDraftMessage"
         @cancel-transfer="cancelTransfer"
         @download-transfer="downloadTransfer"

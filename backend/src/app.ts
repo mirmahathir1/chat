@@ -1,5 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { readRelayConfig, type RelayConfig } from './config.js'
+import { sendJson } from './http/json.js'
+import { resolveRequestPathname } from './http/pathname.js'
 import { createRoomEventsRouteHandler } from './routes/room-events.js'
 import { createTransfersRouteHandler } from './routes/transfers.js'
 import { createRelayLogger } from './services/relay-logger.js'
@@ -32,7 +34,7 @@ export function createRelayApp(config = readRelayConfig()): RelayApp {
   })
 
   const handler: RequestHandler = async (req, res) => {
-    const pathname = normalizePathname(req.url)
+    const pathname = resolveRequestPathname(req.url)
 
     try {
       applyCorsHeaders(req, res, config)
@@ -137,16 +139,6 @@ function resolveErrorResponse(error: unknown) {
   }
 }
 
-function normalizePathname(requestUrl: string | undefined) {
-  const pathname = new URL(requestUrl ?? '/', 'http://localhost').pathname
-
-  if (pathname === '/') {
-    return pathname
-  }
-
-  return pathname.replace(/\/+$/, '')
-}
-
 function applyCorsHeaders(
   req: IncomingMessage,
   res: ServerResponse<IncomingMessage>,
@@ -159,16 +151,11 @@ function applyCorsHeaders(
     res.setHeader('Access-Control-Allow-Origin', allowedOrigin)
   }
 
-  res.setHeader(
-    'Access-Control-Allow-Headers',
-    ['content-type'].join(', ')
-  )
+  res.setHeader('Access-Control-Allow-Headers', ['content-type'].join(', '))
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
   res.setHeader(
     'Access-Control-Expose-Headers',
-    ['content-disposition', 'content-length', 'content-type', 'etag'].join(
-      ', '
-    )
+    ['content-disposition', 'content-length', 'content-type', 'etag'].join(', ')
   )
   res.setHeader('Access-Control-Max-Age', '86400')
   res.setHeader('Cache-Control', 'no-store')
@@ -198,20 +185,6 @@ function getHeaderValue(req: IncomingMessage, headerName: string) {
   }
 
   return header?.[0] ?? null
-}
-
-function sendJson(
-  res: ServerResponse<IncomingMessage>,
-  statusCode: number,
-  payload: unknown
-) {
-  const body = Buffer.from(JSON.stringify(payload))
-
-  res.writeHead(statusCode, {
-    'Content-Length': body.byteLength,
-    'Content-Type': 'application/json; charset=utf-8',
-  })
-  res.end(body)
 }
 
 declare global {

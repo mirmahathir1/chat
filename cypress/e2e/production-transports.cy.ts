@@ -10,6 +10,7 @@ const relayToggleSelector =
 const attachFilesSelector =
   '[data-testid="attach-files"], button[aria-label="Attach files"]'
 const fileInputSelector = '[data-testid="file-input"], .chat-panel__file-input'
+const relayBlobIt = Cypress.env('relayBlobConfigured') ? it : it.skip
 
 function visitHostHome(relay = false) {
   cy.visit('/')
@@ -138,7 +139,7 @@ describe('production transport flows', () => {
     })
   })
 
-  it('test 4: uploads a file over backend relay', () => {
+  relayBlobIt('test 4: uploads a file over backend relay', () => {
     const fileName = 'relay-upload.txt'
 
     visitHostHome(true)
