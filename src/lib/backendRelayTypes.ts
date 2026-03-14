@@ -118,6 +118,22 @@ export interface PollBackendRelayRoomEventsResponse {
   roomId: string
 }
 
+export interface GetBackendRelayHealthResponse {
+  blobConfigured: boolean
+  cleanupIntervalMs: number
+  fileStorageMode: string
+  logLevel: string
+  maxFileBytes: number
+  pollIntervalMs: number
+  roomEventStats: {
+    roomsWithEvents: number
+    storedEvents: number
+  }
+  sessionTtlMs: number
+  status: 'ok'
+  storageMode: string
+}
+
 export interface BackendRelayClient {
   readonly baseUrl: string | null
   readonly isConfigured: boolean
@@ -130,6 +146,7 @@ export interface BackendRelayClient {
   downloadFile(
     request: DownloadBackendRelayFileRequest
   ): Promise<DownloadBackendRelayFileResponse>
+  getHealth(): Promise<GetBackendRelayHealthResponse>
   getRoomEventCursor(
     request: GetBackendRelayRoomEventCursorRequest
   ): Promise<GetBackendRelayRoomEventCursorResponse>

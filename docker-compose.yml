@@ -22,8 +22,9 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    env_file:
+      - .env.local
     environment:
-      BLOB_READ_WRITE_TOKEN: ${BLOB_READ_WRITE_TOKEN:-}
       NODEMON_LEGACY_WATCH: 'true'
       RELAY_ALLOWED_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
       RELAY_PORT: '8787'

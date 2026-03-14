@@ -9,6 +9,7 @@ import type {
   CreateBackendRelayRoomEventResponse,
   DownloadBackendRelayFileRequest,
   DownloadBackendRelayFileResponse,
+  GetBackendRelayHealthResponse,
   GetBackendRelayRoomEventCursorRequest,
   GetBackendRelayRoomEventCursorResponse,
   PollBackendRelayRoomEventsRequest,
@@ -129,6 +130,11 @@ export function createBackendRelayClient(
       return {
         file: await streamResponseToFile(response, requestBody),
       } satisfies DownloadBackendRelayFileResponse
+    },
+    getHealth() {
+      return requestJson<GetBackendRelayHealthResponse>('/api/health', {
+        method: 'GET',
+      })
     },
     getRoomEventCursor(requestBody: GetBackendRelayRoomEventCursorRequest) {
       return requestJson<GetBackendRelayRoomEventCursorResponse>(

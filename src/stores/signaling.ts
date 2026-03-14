@@ -189,14 +189,16 @@ export const useSignalingStore = defineStore('signaling', () => {
   const cancelledIncomingTransfers = new Set<string>()
   const outgoingTransferFiles = new Map<string, File[]>()
   const outgoingTransferModes = new Map<string, OutgoingTransferMode>()
+  const outgoingTransferSessionIds = new Map<string, number>()
   const outgoingTransferTargets = new Map<string, string | null>()
   const outgoingRelayTransfers = new Map<string, OutgoingRelayTransferSession>()
-  const cancelledOutgoingTransfers = new Set<string>()
+  const cancelledOutgoingTransferSessionIds = new Set<number>()
   const pendingDirectOfferAcks = new Map<string, PendingDirectOfferAck>()
   const incomingRelayTransfers = new Map<string, IncomingRelayTransferSession>()
   const incomingTransferActivityTokens = new Map<string, number>()
   const transferSpeedSamples = new Map<string, TransferSpeedSample>()
   let outgoingReplayChain = Promise.resolve()
+  let nextOutgoingTransferSessionId = 0
   let peerBootstrapActivityToken: number | null = null
   let joinConnectionActivityToken: number | null = null
 
@@ -410,17 +412,28 @@ export const useSignalingStore = defineStore('signaling', () => {
     mode: OutgoingTransferMode,
     targetPeerId: string | null = null
   ) {
+    const sessionId = (nextOutgoingTransferSessionId += 1)
+
     outgoingTransferModes.set(transferId, mode)
+    outgoingTransferSessionIds.set(transferId, sessionId)
     outgoingTransferTargets.set(transferId, targetPeerId)
+
+    return sessionId
   }
 
-  function finishOutgoingTransfer(transferId: string) {
+  function finishOutgoingTransfer(transferId: string, sessionId: number) {
+    cancelledOutgoingTransferSessionIds.delete(sessionId)
+
+    if (outgoingTransferSessionIds.get(transferId) !== sessionId) {
+      return
+    }
+
     clearPendingDirectOfferAck(transferId)
     clearTransferSpeedSample(transferId)
     outgoingTransferModes.delete(transferId)
+    outgoingTransferSessionIds.delete(transferId)
     outgoingTransferTargets.delete(transferId)
     outgoingRelayTransfers.delete(transferId)
-    cancelledOutgoingTransfers.delete(transferId)
   }
 
   function clearTransferSpeedSample(transferId: string) {
@@ -503,8 +516,11 @@ export const useSignalingStore = defineStore('signaling', () => {
     roomStore.cancelTransfer(transferId)
   }
 
-  function throwIfOutgoingTransferCancelled(transferId: string) {
-    if (cancelledOutgoingTransfers.has(transferId)) {
+  function throwIfOutgoingTransferCancelled(
+    transferId: string,
+    sessionId: number
+  ) {
+    if (cancelledOutgoingTransferSessionIds.has(sessionId)) {
       throw new TransferCancelledError(transferId)
     }
   }
@@ -564,6 +580,22 @@ export const useSignalingStore = defineStore('signaling', () => {
     return null
   }
 
+  async function ensureBackendRelayFileTransportAvailable() {
+    if (!backendRelayClient.isConfigured) {
+      throw new Error('Backend relay is not configured for this deployment.')
+    }
+
+    const health = await backendRelayClient.getHealth()
+
+    if (health.blobConfigured) {
+      return
+    }
+
+    throw new Error(
+      'Backend relay file transfers are unavailable because BLOB_READ_WRITE_TOKEN is not configured on the relay backend.'
+    )
+  }
+
   function waitForDirectOfferAck(transferId: string, recipientPeerId: string) {
     clearPendingDirectOfferAck(transferId)
 
@@ -595,7 +627,12 @@ export const useSignalingStore = defineStore('signaling', () => {
   }
 
   function handleOutgoingTransferCancelled(message: TransferCancelMessage) {
-    cancelledOutgoingTransfers.add(message.transferId)
+    const sessionId = outgoingTransferSessionIds.get(message.transferId)
+
+    if (sessionId !== undefined) {
+      cancelledOutgoingTransferSessionIds.add(sessionId)
+    }
+
     rejectPendingDirectOfferAck(
       message.transferId,
       new TransferCancelledError(message.transferId)
@@ -614,16 +651,22 @@ export const useSignalingStore = defineStore('signaling', () => {
 
     syncCancelledOutgoingTransfer(message.transferId, mode)
 
-    if (message.targetPeerId) {
-      notifyRecipientsTransferCancelled(message.transferId)
-    }
+    // A recipient-originated cancellation has already reached the recipient that
+    // requested it. Echoing another cancel back can race with a replay request
+    // and re-cancel the restarted download.
   }
 
-  async function disposeIncomingTransfer(transfer: IncomingTransferBuffer) {
+  async function disposeIncomingTransfer(
+    transfer: IncomingTransferBuffer,
+    preserveRelaySession = false
+  ) {
     const relayTransfer = incomingRelayTransfers.get(transfer.transferId)
 
     relayTransfer?.downloadController.abort()
-    incomingRelayTransfers.delete(transfer.transferId)
+
+    if (!preserveRelaySession) {
+      incomingRelayTransfers.delete(transfer.transferId)
+    }
 
     await Promise.all(
       Array.from(transfer.files.values(), async (fileBuffer) => {
@@ -697,11 +740,13 @@ export const useSignalingStore = defineStore('signaling', () => {
 
     outgoingTransferFiles.clear()
     outgoingTransferModes.clear()
+    outgoingTransferSessionIds.clear()
     outgoingRelayTransfers.clear()
-    cancelledOutgoingTransfers.clear()
+    cancelledOutgoingTransferSessionIds.clear()
     pendingDirectOfferAcks.clear()
     clearAllTransferSpeedSamples()
     outgoingReplayChain = Promise.resolve()
+    nextOutgoingTransferSessionId = 0
   }
 
   function resetHistoryLoading() {
@@ -1385,7 +1430,11 @@ export const useSignalingStore = defineStore('signaling', () => {
       return false
     }
 
-    startOutgoingTransfer(transfer.id, 'live', relayRecipientPeerId)
+    const outgoingSessionId = startOutgoingTransfer(
+      transfer.id,
+      'live',
+      relayRecipientPeerId
+    )
     primeTransferSpeedSample(transfer.id)
     roomStore.updateTransferProgress(transfer.id, 0)
 
@@ -1427,6 +1476,7 @@ export const useSignalingStore = defineStore('signaling', () => {
             files,
             recipientPeerId: relayRecipientPeerId!,
             room,
+            sessionId: outgoingSessionId,
             transfer,
           })
         }
@@ -1438,6 +1488,7 @@ export const useSignalingStore = defineStore('signaling', () => {
         await sendTransferOfferOverWebRtc({
           offer,
           room,
+          sessionId: outgoingSessionId,
           transferId: transfer.id,
         })
 
@@ -1458,6 +1509,7 @@ export const useSignalingStore = defineStore('signaling', () => {
               files,
               recipientPeerId,
               room,
+              sessionId: outgoingSessionId,
               transfer,
             })
           }
@@ -1466,6 +1518,7 @@ export const useSignalingStore = defineStore('signaling', () => {
         return finishWebRtcTransferAfterOffer({
           files,
           room,
+          sessionId: outgoingSessionId,
           transfer,
         })
       })
@@ -1491,21 +1544,23 @@ export const useSignalingStore = defineStore('signaling', () => {
         return false
       })
       .finally(() => {
-        finishOutgoingTransfer(transfer.id)
+        finishOutgoingTransfer(transfer.id, outgoingSessionId)
       })
   }
 
   async function sendTransferOfferOverWebRtc({
     offer,
     room,
+    sessionId,
     transferId,
   }: {
     offer: FileOfferMessage
     room: NonNullable<typeof roomStore.room>
+    sessionId: number
     transferId: string
   }) {
     if (room.localMode === 'host') {
-      throwIfOutgoingTransferCancelled(transferId)
+      throwIfOutgoingTransferCancelled(transferId, sessionId)
       broadcastToMembers(offer)
 
       return
@@ -1517,30 +1572,33 @@ export const useSignalingStore = defineStore('signaling', () => {
 
     const connection = hostConnection.value
 
-    throwIfOutgoingTransferCancelled(transferId)
+    throwIfOutgoingTransferCancelled(transferId, sessionId)
     connection.send(offer)
   }
 
   async function finishWebRtcTransferAfterOffer({
     files,
     room,
+    sessionId,
     transfer,
   }: {
     files: File[]
     room: NonNullable<typeof roomStore.room>
+    sessionId: number
     transfer: FileTransfer
   }) {
     if (room.localMode === 'host') {
-      throwIfOutgoingTransferCancelled(transfer.id)
+      throwIfOutgoingTransferCancelled(transfer.id, sessionId)
       await streamTransferFiles(
         transfer,
         files,
+        sessionId,
         (message) => {
           broadcastToMembers(message)
         },
         true
       )
-      throwIfOutgoingTransferCancelled(transfer.id)
+      throwIfOutgoingTransferCancelled(transfer.id, sessionId)
       broadcastToMembers({
         type: 'file-complete',
         roomId: room.id,
@@ -1557,10 +1615,11 @@ export const useSignalingStore = defineStore('signaling', () => {
 
     const connection = hostConnection.value
 
-    throwIfOutgoingTransferCancelled(transfer.id)
+    throwIfOutgoingTransferCancelled(transfer.id, sessionId)
     await streamTransferFiles(
       transfer,
       files,
+      sessionId,
       (message) => {
         if (!connection.open) {
           throw new Error(
@@ -1572,7 +1631,7 @@ export const useSignalingStore = defineStore('signaling', () => {
       },
       true
     )
-    throwIfOutgoingTransferCancelled(transfer.id)
+    throwIfOutgoingTransferCancelled(transfer.id, sessionId)
     connection.send({
       type: 'file-complete',
       roomId: room.id,
@@ -1588,12 +1647,14 @@ export const useSignalingStore = defineStore('signaling', () => {
     files,
     recipientPeerId,
     room,
+    sessionId,
     transfer,
   }: {
     activation: 'preferred' | 'fallback'
     files: File[]
     recipientPeerId: string
     room: NonNullable<typeof roomStore.room>
+    sessionId: number
     transfer: FileTransfer
   }) {
     const localPeer = sessionStore.peer
@@ -1601,6 +1662,9 @@ export const useSignalingStore = defineStore('signaling', () => {
     if (!localPeer || !backendRelayClient.isConfigured) {
       throw new Error('Backend relay is not configured for this deployment.')
     }
+
+    await ensureBackendRelayFileTransportAvailable()
+
     const relayTransfer: OutgoingRelayTransferSession = {
       recipientPeerId,
       uploadedFiles: [],
@@ -1625,7 +1689,7 @@ export const useSignalingStore = defineStore('signaling', () => {
       let uploadedBytes = 0
 
       for (let fileIndex = 0; fileIndex < files.length; fileIndex += 1) {
-        throwIfOutgoingTransferCancelled(transfer.id)
+        throwIfOutgoingTransferCancelled(transfer.id, sessionId)
 
         const file = files[fileIndex]
         const fileMeta = transfer.files[fileIndex]
@@ -1663,7 +1727,7 @@ export const useSignalingStore = defineStore('signaling', () => {
         )
       }
 
-      throwIfOutgoingTransferCancelled(transfer.id)
+      throwIfOutgoingTransferCancelled(transfer.id, sessionId)
 
       const relayOffer = {
         type: 'relay-transfer-offer',
@@ -1898,7 +1962,23 @@ export const useSignalingStore = defineStore('signaling', () => {
     }
   }
 
-  function cancelLocalIncomingTransfer(transferId: string) {
+  function abortIncomingRelayTransferDownload(transferId: string) {
+    const relayTransfer = incomingRelayTransfers.get(transferId)
+
+    if (!relayTransfer) {
+      return false
+    }
+
+    relayTransfer.downloadController.abort()
+    relayTransfer.downloadController = new AbortController()
+
+    return true
+  }
+
+  function cancelLocalIncomingTransfer(
+    transferId: string,
+    preserveRelaySession = false
+  ) {
     cancelledIncomingTransfers.add(transferId)
 
     const roomTransfer = roomStore.transfers.find(
@@ -1913,7 +1993,7 @@ export const useSignalingStore = defineStore('signaling', () => {
       roomStore.cancelTransfer(transferId)
       settleHistoryTransfer(transferId)
       finishIncomingTransferActivity(transferId)
-      void disposeIncomingTransfer(transfer)
+      void disposeIncomingTransfer(transfer, preserveRelaySession)
 
       return roomTransfer ?? null
     }
@@ -2835,6 +2915,7 @@ export const useSignalingStore = defineStore('signaling', () => {
   async function streamTransferFiles(
     transfer: FileTransfer,
     files: File[],
+    sessionId: number,
     send: (message: FileChunkMessage) => void,
     trackProgress = true
   ) {
@@ -2847,7 +2928,7 @@ export const useSignalingStore = defineStore('signaling', () => {
     let sentBytes = 0
 
     for (let fileIndex = 0; fileIndex < files.length; fileIndex += 1) {
-      throwIfOutgoingTransferCancelled(transfer.id)
+      throwIfOutgoingTransferCancelled(transfer.id, sessionId)
 
       const file = files[fileIndex]
       const fileMeta = transfer.files[fileIndex]
@@ -2857,7 +2938,7 @@ export const useSignalingStore = defineStore('signaling', () => {
       }
 
       await readFileInChunks(file, async (chunk, chunkIndex, totalChunks) => {
-        throwIfOutgoingTransferCancelled(transfer.id)
+        throwIfOutgoingTransferCancelled(transfer.id, sessionId)
 
         send({
           type: 'file-chunk',
@@ -2959,28 +3040,33 @@ export const useSignalingStore = defineStore('signaling', () => {
     }
 
     if (roomTransfer.direction === 'incoming') {
-      if (roomTransfer.transport === 'backend-relay') {
-        void cancelIncomingRelayTransferSession(
-          transferId,
-          'The recipient cancelled the backend relay transfer.'
-        )
+      const preserveRelaySession = roomTransfer.transport === 'backend-relay'
+
+      if (preserveRelaySession) {
+        abortIncomingRelayTransferDownload(transferId)
       }
 
-      const cancelledTransfer = cancelLocalIncomingTransfer(transferId)
+      const cancelledTransfer = cancelLocalIncomingTransfer(
+        transferId,
+        preserveRelaySession
+      )
 
       if (!cancelledTransfer) {
         return false
       }
 
-      notifySenderTransferCancelled(cancelledTransfer)
+      if (!preserveRelaySession) {
+        notifySenderTransferCancelled(cancelledTransfer)
+      }
 
       return true
     }
 
     const mode = outgoingTransferModes.get(transferId)
+    const sessionId = outgoingTransferSessionIds.get(transferId)
 
-    if (mode) {
-      cancelledOutgoingTransfers.add(transferId)
+    if (mode && sessionId !== undefined) {
+      cancelledOutgoingTransferSessionIds.add(sessionId)
       rejectPendingDirectOfferAck(
         transferId,
         new TransferCancelledError(transferId)
@@ -3013,6 +3099,29 @@ export const useSignalingStore = defineStore('signaling', () => {
     cancelledIncomingTransfers.delete(transferId)
     primeTransferSpeedSample(transferId)
     roomStore.updateTransferProgress(transferId, 0, 'queued')
+
+    const relayTransfer = incomingRelayTransfers.get(transferId)
+
+    if (transfer.transport === 'backend-relay' && relayTransfer) {
+      handleIncomingRelayTransferOffer({
+        type: 'relay-transfer-offer',
+        roomId: room.id,
+        transferId,
+        sender: {
+          id: transfer.senderId,
+          label: transfer.senderLabel,
+        },
+        files: buildReplayTransferFiles(transfer.files),
+        totalBytes: transfer.totalBytes ?? 0,
+        createdAt: transfer.createdAt,
+        relay: {
+          files: relayTransfer.files,
+        },
+        targetPeerId: localPeer.id,
+      } satisfies RelayTransferOfferMessage)
+
+      return true
+    }
 
     const replayMessage = {
       type: 'replay-transfer',
@@ -3083,7 +3192,11 @@ export const useSignalingStore = defineStore('signaling', () => {
       )
     }
 
-    startOutgoingTransfer(transferId, 'replay', recipientPeerId)
+    const outgoingSessionId = startOutgoingTransfer(
+      transferId,
+      'replay',
+      recipientPeerId
+    )
     primeTransferSpeedSample(transferId)
     roomStore.updateTransferProgress(transferId, 0, 'queued')
 
@@ -3094,13 +3207,14 @@ export const useSignalingStore = defineStore('signaling', () => {
           files: cachedFiles,
           recipientPeerId,
           room,
+          sessionId: outgoingSessionId,
           transfer,
         })
 
         return
       } finally {
         roomStore.completeTransfer(transferId)
-        finishOutgoingTransfer(transferId)
+        finishOutgoingTransfer(transferId, outgoingSessionId)
       }
     }
 
@@ -3120,7 +3234,7 @@ export const useSignalingStore = defineStore('signaling', () => {
 
     try {
       if (room.localMode === 'host') {
-        throwIfOutgoingTransferCancelled(transferId)
+        throwIfOutgoingTransferCancelled(transferId, outgoingSessionId)
         if (!sendToMember(recipientPeerId, offer)) {
           throw new Error('The replay recipient is no longer connected.')
         }
@@ -3128,6 +3242,7 @@ export const useSignalingStore = defineStore('signaling', () => {
         await streamTransferFiles(
           transfer,
           cachedFiles,
+          outgoingSessionId,
           (message) => {
             if (
               !sendToMember(recipientPeerId, {
@@ -3142,7 +3257,7 @@ export const useSignalingStore = defineStore('signaling', () => {
           },
           true
         )
-        throwIfOutgoingTransferCancelled(transferId)
+        throwIfOutgoingTransferCancelled(transferId, outgoingSessionId)
         sendToMember(recipientPeerId, {
           type: 'file-complete',
           roomId: room.id,
@@ -3159,11 +3274,12 @@ export const useSignalingStore = defineStore('signaling', () => {
         )
       }
 
-      throwIfOutgoingTransferCancelled(transferId)
+      throwIfOutgoingTransferCancelled(transferId, outgoingSessionId)
       hostConnection.value.send(offer)
       await streamTransferFiles(
         transfer,
         cachedFiles,
+        outgoingSessionId,
         (message) => {
           if (!hostConnection.value?.open) {
             throw new Error(
@@ -3178,7 +3294,7 @@ export const useSignalingStore = defineStore('signaling', () => {
         },
         true
       )
-      throwIfOutgoingTransferCancelled(transferId)
+      throwIfOutgoingTransferCancelled(transferId, outgoingSessionId)
       hostConnection.value.send({
         type: 'file-complete',
         roomId: room.id,
@@ -3187,7 +3303,7 @@ export const useSignalingStore = defineStore('signaling', () => {
       } satisfies FileCompleteMessage)
     } finally {
       roomStore.completeTransfer(transferId)
-      finishOutgoingTransfer(transferId)
+      finishOutgoingTransfer(transferId, outgoingSessionId)
     }
   }
 

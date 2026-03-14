@@ -4,6 +4,7 @@ import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import AppBrand from '@/components/AppBrand.vue'
 import RelayPreferencePanel from '@/components/room/RelayPreferencePanel.vue'
+import { createBackendRelayClient } from '@/lib/backendRelayClient'
 import { normalizeHumanReadableId } from '@/lib/humanId'
 import SharePanel from '@/components/room/SharePanel.vue'
 import { useRoomStore } from '@/stores/room'
@@ -26,6 +27,21 @@ const {
 const joinRoomCode = ref('')
 const joinRoomError = ref('')
 const showSharePanel = computed(() => Boolean(room.value && isReady.value))
+const relayBackendClient = createBackendRelayClient()
+const relayFileTransfersConfigured = ref(relayBackendConfigured.value)
+
+if (relayBackendClient.isConfigured) {
+  void relayBackendClient
+    .getHealth()
+    .then((health) => {
+      relayFileTransfersConfigured.value = health.blobConfigured
+    })
+    .catch(() => {
+      relayFileTransfersConfigured.value = false
+    })
+} else {
+  relayFileTransfersConfigured.value = false
+}
 
 if (!roomStore.room || roomStore.room.localMode !== 'host') {
   signalingStore.ensureHost(roomStore.bootstrapHostedRoom())
@@ -172,7 +188,7 @@ function joinTypedRoom() {
 
           <RelayPreferencePanel
             v-model="preferBackendRelay"
-            :configured="relayBackendConfigured"
+            :configured="relayFileTransfersConfigured"
           />
         </div>
       </div>

@@ -42,8 +42,8 @@ function handleToggle(event: Event) {
           <p class="eyebrow">Transfer route</p>
           <p class="relay-panel__detail">{{ detailLabel }}</p>
           <p v-if="modelValue && !configured" class="relay-panel__warning">
-            Backend relay is selected, but `VITE_RELAY_BACKEND_URL` is not set
-            yet.
+            Backend relay file transfers are unavailable until the relay backend
+            has Blob storage configured.
           </p>
         </div>
         <label class="relay-panel__switch" data-testid="relay-switch">

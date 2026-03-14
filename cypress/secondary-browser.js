@@ -159,19 +159,33 @@ export async function secondaryBrowserWaitForChatReady() {
 export async function secondaryBrowserJoinRoom(payload) {
   const currentPage = getPage()
 
-  await waitForHomeReady(currentPage, 20000)
+  try {
+    await waitForHomeReady(currentPage, 20000)
 
-  if (payload.useRelay) {
-    await setRelayMode(currentPage, true)
+    if (payload.useRelay) {
+      await setRelayMode(currentPage, true)
+    }
+
+    await currentPage.click(manualRoomCodeSelector, {
+      clickCount: 3,
+    })
+    await currentPage.keyboard.press('Backspace')
+    await currentPage.type(manualRoomCodeSelector, payload.roomCode)
+    await currentPage.click(joinRoomButtonSelector)
+    await secondaryBrowserWaitForChatReady()
+  } catch (error) {
+    const bodyText = await getSecondaryBrowserBodyText()
+
+    throw new Error(
+      [
+        error instanceof Error ? error.message : 'Joining the room failed.',
+        `Body text snapshot: ${bodyText.replace(/\s+/g, ' ').trim().slice(0, 500)}`,
+      ].join('\n'),
+      {
+        cause: error,
+      }
+    )
   }
-
-  await currentPage.click(manualRoomCodeSelector, {
-    clickCount: 3,
-  })
-  await currentPage.keyboard.press('Backspace')
-  await currentPage.type(manualRoomCodeSelector, payload.roomCode)
-  await currentPage.click(joinRoomButtonSelector)
-  await secondaryBrowserWaitForChatReady()
 }
 
 export async function secondaryBrowserSendFile(payload) {
@@ -194,6 +208,140 @@ export async function secondaryBrowserSendFile(payload) {
     input.dispatchEvent(new Event('input', { bubbles: true }))
     input.dispatchEvent(new Event('change', { bubbles: true }))
   })
+}
+
+export async function secondaryBrowserWaitForTransferProgress(payload) {
+  const currentPage = getPage()
+
+  try {
+    await currentPage.waitForFunction(
+      ({ fileName, minimumProgress }) => {
+        const entries = Array.from(
+          document.querySelectorAll('[data-testid="chat-entry"]')
+        )
+        const entry = entries.find((item) =>
+          item.textContent?.includes(fileName)
+        )
+
+        if (!(entry instanceof HTMLElement)) {
+          return false
+        }
+
+        const text = entry.textContent?.replace(/\s+/g, ' ').trim() ?? ''
+
+        if (text.includes('completed')) {
+          return true
+        }
+
+        if (text.includes('cancelled')) {
+          return false
+        }
+
+        const fill = entry.querySelector('.chat-panel__transfer-progress-fill')
+        const style = fill?.getAttribute('style') ?? ''
+        const match = style.match(/width:\s*([0-9.]+)%/)
+        const progress = match ? Number.parseFloat(match[1]) : 0
+
+        return progress > minimumProgress
+      },
+      {
+        timeout: payload.timeoutMs ?? 30000,
+      },
+      {
+        fileName: payload.fileName,
+        minimumProgress: payload.minimumProgress ?? 0,
+      }
+    )
+  } catch (error) {
+    const snapshot = await currentPage.evaluate((fileName) => {
+      const entries = Array.from(
+        document.querySelectorAll('[data-testid="chat-entry"]')
+      )
+      const entry = entries.find((item) => item.textContent?.includes(fileName))
+
+      if (!(entry instanceof HTMLElement)) {
+        return `Missing transfer entry for ${fileName}.`
+      }
+
+      const text = entry.textContent?.replace(/\s+/g, ' ').trim() ?? ''
+      const fill = entry.querySelector('.chat-panel__transfer-progress-fill')
+      const style = fill?.getAttribute('style') ?? ''
+      const match = style.match(/width:\s*([0-9.]+)%/)
+      const progress = text.includes('completed')
+        ? 100
+        : match
+          ? Number.parseFloat(match[1])
+          : 0
+
+      return `Transfer snapshot: ${text} (progress=${progress}%)`
+    }, payload.fileName)
+
+    throw new Error(
+      [
+        error instanceof Error
+          ? error.message
+          : 'Waiting for transfer progress failed.',
+        snapshot,
+      ].join('\n'),
+      {
+        cause: error,
+      }
+    )
+  }
+}
+
+export async function secondaryBrowserWaitForTransferStatus(payload) {
+  const currentPage = getPage()
+
+  try {
+    await currentPage.waitForFunction(
+      ({ fileName, status }) => {
+        const entries = Array.from(
+          document.querySelectorAll('[data-testid="chat-entry"]')
+        )
+        const entry = entries.find((item) =>
+          item.textContent?.includes(fileName)
+        )
+
+        if (!(entry instanceof HTMLElement)) {
+          return false
+        }
+
+        const text = entry.textContent?.replace(/\s+/g, ' ').trim() ?? ''
+
+        return text.includes(status)
+      },
+      {
+        timeout: payload.timeoutMs ?? 30000,
+      },
+      payload
+    )
+  } catch (error) {
+    const snapshot = await currentPage.evaluate((fileName) => {
+      const entries = Array.from(
+        document.querySelectorAll('[data-testid="chat-entry"]')
+      )
+      const entry = entries.find((item) => item.textContent?.includes(fileName))
+
+      if (!(entry instanceof HTMLElement)) {
+        return `Missing transfer entry for ${fileName}.`
+      }
+
+      return `Transfer snapshot: ${entry.textContent?.replace(/\s+/g, ' ').trim() ?? ''}`
+    }, payload.fileName)
+
+    throw new Error(
+      [
+        error instanceof Error
+          ? error.message
+          : 'Waiting for transfer status failed.',
+        snapshot,
+      ].join('\n'),
+      {
+        cause: error,
+      }
+    )
+  }
 }
 
 export async function secondaryBrowserWaitForText(payload) {
