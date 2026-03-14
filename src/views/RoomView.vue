@@ -26,6 +26,8 @@ const {
   showJoinBanner,
   showHostDisconnectedModal,
   hostDisconnectedDetail,
+  currentTransportLabel,
+  currentTransportDetail,
   localPeerId,
   localPeerLabel,
   goBack,
@@ -209,6 +211,12 @@ const {
               </div>
             </section>
           </Transition>
+
+          <section class="panel room-view__transport-panel">
+            <p class="eyebrow">Transport</p>
+            <h2>{{ currentTransportLabel }}</h2>
+            <p>{{ currentTransportDetail }}</p>
+          </section>
 
           <SharePanel :room="room" />
           <MembersPanel
@@ -533,6 +541,21 @@ const {
   font-size: 0.9rem;
 }
 
+.room-view__transport-panel {
+  padding: 1.25rem 1.5rem;
+}
+
+.room-view__transport-panel h2 {
+  margin: 0.25rem 0 0;
+  font-size: 1.35rem;
+}
+
+.room-view__transport-panel p:last-child {
+  margin: 0.75rem 0 0;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
 .room-view__empty-state h1 {
   margin: 0.35rem 0 0;
   font-size: 2.4rem;
@@ -585,6 +608,7 @@ const {
   }
 
   .room-view__join-banner,
+  .room-view__transport-panel,
   .room-view__empty-state {
     padding: 1rem;
   }

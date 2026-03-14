@@ -1,6 +1,7 @@
 import { storeToRefs } from 'pinia'
 import { computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { getTransferTransportLabel } from '@/lib/transferTransport'
 import type { PreparedUpload } from '@/lib/uploadSelection'
 import {
   getHostPeerIdFromQuery,
@@ -28,6 +29,7 @@ export function useRoomRouteBootstrap() {
     draftMessage,
     isJoinView,
     connectedMemberCount,
+    activeTransferTransport,
     preferBackendRelay,
   } = storeToRefs(roomStore)
   const { items: notifications } = storeToRefs(notificationStore)
@@ -136,6 +138,22 @@ export function useRoomRouteBootstrap() {
   const hostDisconnectedDetail = computed(
     () => errorMessage.value ?? 'The host is no longer connected to this room.'
   )
+  const currentTransportLabel = computed(() =>
+    preferBackendRelay.value
+      ? 'Backend relay'
+      : getTransferTransportLabel(activeTransferTransport.value)
+  )
+  const currentTransportDetail = computed(() => {
+    if (preferBackendRelay.value) {
+      return 'This room is routing chat and file transfers through the backend relay.'
+    }
+
+    if (activeTransferTransport.value === 'backend-relay') {
+      return 'A current transfer has fallen back to the backend relay while the room stays in WebRTC-first mode.'
+    }
+
+    return 'This room is currently using WebRTC for direct peer-to-peer traffic.'
+  })
   const localPeerId = computed(() => sessionStore.peer?.id ?? null)
   const localPeerLabel = computed(
     () => sessionStore.peer?.label ?? 'Unassigned'
@@ -228,6 +246,8 @@ export function useRoomRouteBootstrap() {
     showJoinBanner,
     showHostDisconnectedModal,
     hostDisconnectedDetail,
+    currentTransportLabel,
+    currentTransportDetail,
     localPeerId,
     localPeerLabel,
     goBack,
